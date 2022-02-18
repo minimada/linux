@@ -504,6 +504,17 @@ config NPCM7XX_JTAG_MASTER
 	help
 	  Control PSPI/GPIO to transmit jtag signals to support jtag master function.
 
+config NPCM750_VCD
+	tristate "Nuvoton VCD support"
+        help
+          Enable Nuvoton vcd.
+
+config NPCM750_ECE
+	tristate "Nuvoton ECE support"
+	help
+	  Enable Nuvoton Encoding and Compression Engine.
+
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
