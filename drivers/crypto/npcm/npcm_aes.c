@@ -658,6 +658,7 @@ static void AES_CryptData(
 			ctrl = ioread32(NPCM_GDMA_REG_CTL(gdma_aes_base, 0));
 			gdma_timeout++;
 		} while ((ctrl & GDMA_CTRL_SOFTREQ) && (gdma_timeout < GDMA_TIMEOUT));
+
 		if (gdma_timeout >= GDMA_TIMEOUT) 
 			pr_info(" GDMA Tx failed\n");
 
@@ -666,6 +667,7 @@ static void AES_CryptData(
 			ctrl = ioread32(NPCM_GDMA_REG_CTL(gdma_aes_base, 1));
 			gdma_timeout++;
 		} while ((ctrl & GDMA_CTRL_SOFTREQ) && (gdma_timeout < GDMA_TIMEOUT));
+
 		if (gdma_timeout >= GDMA_TIMEOUT) 
 			pr_info(" GDMA Rx failed\n");
 
@@ -682,6 +684,9 @@ static void AES_CryptData(
 		aes_print_hex_dump("\t out =>", (void *)dma_from_buf, size);
 
 		memcpy(dataOut_byte, dma_from_buf, size);
+
+		dma_free_coherent(dev_aes, size, dma_to_buf, dma_to_addr_data);
+		dma_free_coherent(dev_aes, size, dma_from_buf, dma_from_addr_data);
 	}
 }
 
