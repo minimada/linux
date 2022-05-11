@@ -35,6 +35,7 @@
 #include <linux/mfd/syscon.h>
 
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 
 #include <net/ip.h>
 #include <net/ncsi.h>
@@ -1834,7 +1835,7 @@ static void get_mac_address(struct net_device *netdev)
 	struct device_node *np = ether->pdev->dev.of_node;
 	const u8 *mac_address = NULL;
 
-	mac_address = of_get_mac_address(np);
+	of_get_mac_address(np, mac_address);
 
 	if (IS_ERR(mac_address)) {
 		eth_hw_addr_random(netdev);
