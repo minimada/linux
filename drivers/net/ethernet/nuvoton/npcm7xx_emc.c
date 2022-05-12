@@ -1833,11 +1833,12 @@ static void get_mac_address(struct net_device *netdev)
 	struct npcm7xx_ether *ether = netdev_priv(netdev);
 	struct platform_device *pdev = ether->pdev;
 	struct device_node *np = ether->pdev->dev.of_node;
-	const u8 *mac_address = NULL;
+	u8 mac_address[ETH_ALEN] = { 0 };
+	int err;
 
-	of_get_mac_address(np, mac_address);
+	err = of_get_mac_address(np, mac_address);
 
-	if (IS_ERR(mac_address)) {
+	if (err) {
 		eth_hw_addr_random(netdev);
 		dev_info(&pdev->dev,
 			"%s: device MAC address (random generator) %pM\n",
