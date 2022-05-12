@@ -63,11 +63,12 @@
 #define NPCM_PECI_PULL_DOWN_MAX			2
 
 struct npcm_peci {
+	struct peci_controller *controller;
 	u32			cmd_timeout_ms;
 	u32			host_bit_rate;
 	struct completion	xfer_complete;
 	struct regmap		*gcr_regmap;
-	struct peci_adapter	*adapter;
+	//struct peci_adapter	*adapter;
 	struct regmap		*regmap;
 	u32			status;
 	spinlock_t		lock; /* to sync completion status handling */
@@ -76,8 +77,10 @@ struct npcm_peci {
 	int			irq;
 };
 
+//static int npcm_peci_xfer_native(struct npcm_peci *priv,
+//				 struct peci_xfer_msg *msg)
 static int npcm_peci_xfer_native(struct npcm_peci *priv,
-				 struct peci_xfer_msg *msg)
+				 u8 addr, struct peci_request *req)
 {
 	long err, timeout = msecs_to_jiffies(priv->cmd_timeout_ms);
 	unsigned long flags;
@@ -96,18 +99,18 @@ static int npcm_peci_xfer_native(struct npcm_peci *priv,
 	spin_lock_irqsave(&priv->lock, flags);
 	reinit_completion(&priv->xfer_complete);
 
-	regmap_write(priv->regmap, NPCM_PECI_ADDR, msg->addr);
+	regmap_write(priv->regmap, NPCM_PECI_ADDR, addr);
 	regmap_write(priv->regmap, NPCM_PECI_RD_LENGTH,
-		     NPCM_PECI_WR_LEN_MASK & msg->rx_len);
+		     NPCM_PECI_WR_LEN_MASK & req->rx.len);
 	regmap_write(priv->regmap, NPCM_PECI_WR_LENGTH,
-		     NPCM_PECI_WR_LEN_MASK & msg->tx_len);
+		     NPCM_PECI_WR_LEN_MASK & req->tx.len);
 
-	if (msg->tx_len) {
-		regmap_write(priv->regmap, NPCM_PECI_CMD, msg->tx_buf[0]);
+	if (req->tx.len) {
+		regmap_write(priv->regmap, NPCM_PECI_CMD, req->tx.buf[0]);
 
-		for (i = 0; i < (msg->tx_len - 1); i++)
+		for (i = 0; i < (req->tx.len - 1); i++)
 			regmap_write(priv->regmap, NPCM_PECI_DAT_INOUT(i),
-				     msg->tx_buf[i + 1]);
+				     req->tx.buf[i + 1]);
 	}
 
 	priv->status = 0;
@@ -139,9 +142,9 @@ static int npcm_peci_xfer_native(struct npcm_peci *priv,
 		goto err_irqrestore;
 	}
 
-	for (i = 0; i < msg->rx_len; i++) {
+	for (i = 0; i < req->rx.len; i++) {
 		regmap_read(priv->regmap, NPCM_PECI_DAT_INOUT(i), &msg_rd);
-		msg->rx_buf[i] = (u8)msg_rd;
+		req->rx.buf[i] = (u8)msg_rd;
 	}
 
 err_irqrestore:
@@ -300,78 +303,99 @@ static const struct regmap_config npcm_peci_regmap_config = {
 	.fast_io = true,
 };
 
-static int npcm_peci_xfer(struct peci_adapter *adapter,
-			  struct peci_xfer_msg *msg)
+//static int npcm_peci_xfer(struct peci_adapter *adapter,
+//			  struct peci_xfer_msg *msg)
+static int npcm_peci_xfer(struct peci_controller *controller,
+			    u8 addr, struct peci_request *req)
 {
-	struct npcm_peci *priv = peci_get_adapdata(adapter);
+	//struct npcm_peci *priv = peci_get_adapdata(adapter);
+	struct npcm_peci *priv = dev_get_drvdata(controller->dev.parent);
 
-	return npcm_peci_xfer_native(priv, msg);
+	return npcm_peci_xfer_native(priv, addr, req);
 }
+
+static struct peci_controller_ops npcm_peci_ops = {
+	.xfer = npcm_peci_xfer,
+};
 
 static int npcm_peci_probe(struct platform_device *pdev)
 {
-	struct peci_adapter *adapter;
+	//struct peci_adapter *adapter;
+	struct peci_controller *controller;
 	struct npcm_peci *priv;
 	void __iomem *base;
 	int ret;
 
-	adapter = peci_alloc_adapter(&pdev->dev, sizeof(*priv));
-	if (!adapter)
+	//adapter = peci_alloc_adapter(&pdev->dev, sizeof(*priv));
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
 		return -ENOMEM;
 
-	priv = peci_get_adapdata(adapter);
-	priv->adapter = adapter;
+	//priv = peci_get_adapdata(adapter);
+	//priv->adapter = adapter;
 	priv->dev = &pdev->dev;
 	dev_set_drvdata(&pdev->dev, priv);
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base)) {
-		ret = PTR_ERR(base);
-		goto err_put_adapter_dev;
+		//ret = PTR_ERR(base);
+		//goto err_put_adapter_dev;
+		return dev_err_probe(priv->dev, PTR_ERR(base), "cannot get base");
 	}
 
 	priv->regmap = devm_regmap_init_mmio(&pdev->dev, base,
 					     &npcm_peci_regmap_config);
 	if (IS_ERR(priv->regmap)) {
-		ret = PTR_ERR(priv->regmap);
-		goto err_put_adapter_dev;
+		//ret = PTR_ERR(priv->regmap);
+		//goto err_put_adapter_dev;
+		return dev_err_probe(priv->dev, PTR_ERR(priv->regmap), "remap fail");
 	}
 
 	priv->irq = platform_get_irq(pdev, 0);
 	if (!priv->irq) {
-		ret = -ENODEV;
-		goto err_put_adapter_dev;
+		//ret = -ENODEV;
+		//goto err_put_adapter_dev;
+		return -ENODEV;
 	}
 
 	ret = devm_request_irq(&pdev->dev, priv->irq, npcm_peci_irq_handler,
 			       0, "peci-npcm-irq", priv);
 	if (ret)
-		goto err_put_adapter_dev;
+		return ret;
+		//goto err_put_adapter_dev;
 
 	init_completion(&priv->xfer_complete);
 	spin_lock_init(&priv->lock);
 
-	priv->adapter->owner = THIS_MODULE;
-	priv->adapter->dev.of_node = of_node_get(dev_of_node(priv->dev));
-	strlcpy(priv->adapter->name, pdev->name, sizeof(priv->adapter->name));
-	priv->adapter->xfer = npcm_peci_xfer;
+	//priv->adapter->owner = THIS_MODULE;
+	//priv->adapter->dev.of_node = of_node_get(dev_of_node(priv->dev));
+	//strlcpy(priv->adapter->name, pdev->name, sizeof(priv->adapter->name));
+	//priv->adapter->xfer = npcm_peci_xfer;
 
 	ret = npcm_peci_init_ctrl(priv);
 	if (ret)
-		goto err_put_adapter_dev;
+		return dev_err_probe(priv->dev, ret, "init peci fail");
+		//goto err_put_adapter_dev;
 
-	ret = peci_add_adapter(priv->adapter);
-	if (ret)
-		goto err_put_adapter_dev;
+	//ret = peci_add_adapter(priv->adapter);
+	//if (ret)
+	//	goto err_put_adapter_dev;
 
+	controller = devm_peci_controller_add(priv->dev, &npcm_peci_ops);
+	if (IS_ERR(controller))
+		return dev_err_probe(priv->dev, PTR_ERR(controller),
+				     "failed to add npcm peci controller\n");
+	
+	priv->controller = controller;
 	dev_info(&pdev->dev, "peci bus %d registered, host negotiation bit rate %dHz",
-		 priv->adapter->nr, priv->host_bit_rate);
+		 controller->id, priv->host_bit_rate);
 
 	return 0;
 
+/*
 err_put_adapter_dev:
 	put_device(&adapter->dev);
-	return ret;
+	return ret;*/
 }
 
 static int npcm_peci_remove(struct platform_device *pdev)
@@ -379,8 +403,8 @@ static int npcm_peci_remove(struct platform_device *pdev)
 	struct npcm_peci *priv = dev_get_drvdata(&pdev->dev);
 
 	clk_disable_unprepare(priv->clk);
-	peci_del_adapter(priv->adapter);
-	of_node_put(priv->adapter->dev.of_node);
+	//peci_del_adapter(priv->adapter);
+	//of_node_put(priv->adapter->dev.of_node);
 
 	return 0;
 }
