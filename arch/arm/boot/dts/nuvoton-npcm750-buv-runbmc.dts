@@ -150,6 +150,7 @@
 		#size-cells = <1>;
 		reg = <0>;
 		spi-rx-bus-width = <2>;
+		spi-tx-bus-width = <2>;
 
 		partitions@80000000 {
 			compatible = "fixed-partitions";
@@ -187,7 +188,8 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 		reg = <1>;
-		npcm,fiu-rx-bus-width = <2>;
+		spi-rx-bus-width = <2>;
+		spi-tx-bus-width = <2>;
 
 		partitions@88000000 {
 			compatible = "fixed-partitions";
@@ -215,6 +217,7 @@
 		#size-cells = <1>;
 		reg = <0>;
 		spi-rx-bus-width = <2>;
+		spi-tx-bus-width = <2>;
 
 		partitions@A0000000 {
 			compatible = "fixed-partitions";
@@ -239,6 +242,7 @@
 		#size-cells = <1>;
 		reg = <0>;
 		spi-rx-bus-width = <1>;
+		spi-tx-bus-width = <1>;
 
 		partitions@F8000000 {
 			compatible = "fixed-partitions";
