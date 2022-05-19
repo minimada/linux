@@ -213,11 +213,11 @@ static struct dentry *npcm7xx_fs_dir;
 #define MHZ (1000 * 1000)
 #define MII_TIMEOUT	100
 
-struct plat_npcm7xx_emc_data {
+/*struct plat_npcm7xx_emc_data {
 	char *phy_bus_name;
 	int phy_addr;
 	unsigned char mac_addr[ETH_ALEN];
-};
+};*/
 
 struct npcm7xx_rxbd {
 	__le32 sl;
@@ -273,6 +273,8 @@ struct  npcm7xx_ether {
 	int need_reset;
 	char *dump_buf;
 	struct reset_control *reset;
+
+	u8 mac_addr[ETH_ALEN];
 
 	/* Scratch page to use when rx skb alloc fails */
 	void *rx_scratch;
@@ -1175,7 +1177,8 @@ static int npcm7xx_set_mac_address(struct net_device *netdev, void *addr)
 	if (!is_valid_ether_addr((u8 *)address->sa_data))
 		return -EADDRNOTAVAIL;
 
-	memcpy(netdev->dev_addr, address->sa_data, netdev->addr_len);
+	//memcpy(netdev->dev_addr, address->sa_data, netdev->addr_len);
+	eth_hw_addr_set(netdev, address->sa_data);
 	npcm7xx_write_cam(netdev, CAM0, netdev->dev_addr);
 
 	return 0;
@@ -1833,10 +1836,9 @@ static void get_mac_address(struct net_device *netdev)
 	struct npcm7xx_ether *ether = netdev_priv(netdev);
 	struct platform_device *pdev = ether->pdev;
 	struct device_node *np = ether->pdev->dev.of_node;
-	u8 mac_address[ETH_ALEN] = { 0 };
 	int err;
 
-	err = of_get_mac_address(np, mac_address);
+	err = of_get_mac_address(np, ether->mac_addr);
 
 	if (err) {
 		eth_hw_addr_random(netdev);
@@ -1844,7 +1846,8 @@ static void get_mac_address(struct net_device *netdev)
 			"%s: device MAC address (random generator) %pM\n",
 			netdev->name, netdev->dev_addr);
 	} else {
-		ether_addr_copy(netdev->dev_addr, mac_address);
+		//ether_addr_copy(netdev->dev_addr, ether->mac_addr);
+		eth_hw_addr_set(netdev, ether->mac_addr);
 		if (is_valid_ether_addr(netdev->dev_addr)) {
 			dev_info(&pdev->dev, "%s: device MAC address : %pM\n",
 			pdev->name, netdev->dev_addr);
