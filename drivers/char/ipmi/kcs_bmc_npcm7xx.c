@@ -38,6 +38,7 @@
 #define KCS2CTL		0x2A
 #define KCS3CTL		0x3C
 #define    KCS_CTL_IBFIE	BIT(0)
+#define    KCS_CTL_OBEIE	BIT(1)
 
 #define KCS1IE		0x1C
 #define KCS2IE		0x2E
@@ -72,16 +73,16 @@ struct npcm7xx_kcs_bmc {
 	const struct npcm7xx_kcs_reg *reg;
 };
 
-static inline struct npcm7xx_kcs_bmc *to_npcm7xx_kcs_bmc(struct kcs_bmc_device *kcs_bmc)
-{
-	return container_of(kcs_bmc, struct npcm7xx_kcs_bmc, kcs_bmc);
-}
-
 static const struct npcm7xx_kcs_reg npcm7xx_kcs_reg_tbl[KCS_CHANNEL_MAX] = {
 	{ .sts = KCS1ST, .dob = KCS1DO, .dib = KCS1DI, .ctl = KCS1CTL, .ie = KCS1IE },
 	{ .sts = KCS2ST, .dob = KCS2DO, .dib = KCS2DI, .ctl = KCS2CTL, .ie = KCS2IE },
 	{ .sts = KCS3ST, .dob = KCS3DO, .dib = KCS3DI, .ctl = KCS3CTL, .ie = KCS3IE },
 };
+
+static inline struct npcm7xx_kcs_bmc *to_npcm7xx_kcs_bmc(struct kcs_bmc_device *kcs_bmc)
+{
+	return container_of(kcs_bmc, struct npcm7xx_kcs_bmc, kcs_bmc);
+}
 
 static u8 npcm7xx_kcs_inb(struct kcs_bmc_device *kcs_bmc, u32 reg)
 {
@@ -104,12 +105,12 @@ static void npcm7xx_kcs_outb(struct kcs_bmc_device *kcs_bmc, u32 reg, u8 data)
 	WARN(rc != 0, "regmap_write() failed: %d\n", rc);
 }
 
-static void npcm7xx_kcs_updateb(struct kcs_bmc_device *kcs_bmc, u32 reg, u8 mask, u8 val)
+static void npcm7xx_kcs_updateb(struct kcs_bmc_device *kcs_bmc, u32 reg, u8 mask, u8 data)
 {
 	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
 	int rc;
 
-	rc = regmap_update_bits(priv->map, reg, mask, val);
+	rc = regmap_update_bits(priv->map, reg, mask, data);
 	WARN(rc != 0, "regmap_update_bits() failed: %d\n", rc);
 }
 
@@ -117,38 +118,29 @@ static void npcm7xx_kcs_enable_channel(struct kcs_bmc_device *kcs_bmc, bool enab
 {
 	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
 
-	regmap_update_bits(priv->map, priv->reg->ctl, KCS_CTL_IBFIE,
-			   enable ? KCS_CTL_IBFIE : 0);
-
 	regmap_update_bits(priv->map, priv->reg->ie, KCS_IE_IRQE | KCS_IE_HIRQE,
 			   enable ? KCS_IE_IRQE | KCS_IE_HIRQE : 0);
 }
 
-// TODO: implement this function
 static void npcm7xx_kcs_irq_mask_update(struct kcs_bmc_device *kcs_bmc, u8 mask, u8 state)
 {
-	//struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
+	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
 
-	const bool enable = (state == 0);
-	npcm7xx_kcs_enable_channel(kcs_bmc, enable);
+	if (mask & KCS_BMC_EVENT_TYPE_OBE)
+		regmap_update_bits(priv->map, priv->reg->ctl, KCS_CTL_OBEIE,
+				   !!(state & KCS_BMC_EVENT_TYPE_OBE) * KCS_CTL_OBEIE);
+
+	if (mask & KCS_BMC_EVENT_TYPE_IBF)
+		regmap_update_bits(priv->map, priv->reg->ctl, KCS_CTL_IBFIE,
+				   !!(state & KCS_BMC_EVENT_TYPE_IBF) * KCS_CTL_IBFIE);
 }
 
 static irqreturn_t npcm7xx_kcs_irq(int irq, void *arg)
 {
 	struct kcs_bmc_device *kcs_bmc = arg;
 
-	if (!kcs_bmc_handle_event(kcs_bmc))
-		return IRQ_HANDLED;
-
-	return IRQ_NONE;
+	return kcs_bmc_handle_event(kcs_bmc);
 }
-
-static const struct kcs_bmc_device_ops npcm7xx_kcs_ops = {
-	.irq_mask_update = npcm7xx_kcs_irq_mask_update,
-	.io_inputb = npcm7xx_kcs_inb,
-	.io_outputb = npcm7xx_kcs_outb,
-	.io_updateb = npcm7xx_kcs_updateb,
-};
 
 static int npcm7xx_kcs_config_irq(struct kcs_bmc_device *kcs_bmc,
 				  struct platform_device *pdev)
@@ -164,6 +156,13 @@ static int npcm7xx_kcs_config_irq(struct kcs_bmc_device *kcs_bmc,
 				dev_name(dev), kcs_bmc);
 }
 
+static const struct kcs_bmc_device_ops npcm7xx_kcs_ops = {
+	.irq_mask_update = npcm7xx_kcs_irq_mask_update,
+	.io_inputb = npcm7xx_kcs_inb,
+	.io_outputb = npcm7xx_kcs_outb,
+	.io_updateb = npcm7xx_kcs_updateb,
+};
+
 static int npcm7xx_kcs_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -178,13 +177,11 @@ static int npcm7xx_kcs_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	//kcs_bmc = kcs_bmc_alloc(dev, sizeof(*priv), chan);
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	//priv = kcs_bmc_priv(kcs_bmc);
-	priv->map = syscon_node_to_regmap(pdev->dev.parent->of_node);
+	priv->map = syscon_node_to_regmap(dev->parent->of_node);
 	if (IS_ERR(priv->map)) {
 		dev_err(dev, "Couldn't get regmap\n");
 		return -ENODEV;
@@ -198,20 +195,19 @@ static int npcm7xx_kcs_probe(struct platform_device *pdev)
 	kcs_bmc->ioreg.odr = priv->reg->dob;
 	kcs_bmc->ioreg.str = priv->reg->sts;
 	kcs_bmc->ops = &npcm7xx_kcs_ops;
-	//kcs_bmc->io_inputb = npcm7xx_kcs_inb;
-	//kcs_bmc->io_outputb = npcm7xx_kcs_outb;
 
-	//dev_set_drvdata(dev, kcs_bmc);
 	platform_set_drvdata(pdev, priv);
 
 	rc = npcm7xx_kcs_config_irq(kcs_bmc, pdev);
 	if (rc)
 		return rc;
+
+	npcm7xx_kcs_irq_mask_update(kcs_bmc, (KCS_BMC_EVENT_TYPE_IBF | KCS_BMC_EVENT_TYPE_OBE), 0);
 	npcm7xx_kcs_enable_channel(kcs_bmc, true);
 
-	rc = kcs_bmc_add_device(&priv->kcs_bmc);
+	rc = kcs_bmc_add_device(kcs_bmc);
 	if (rc) {
-		dev_err(dev, "Unable to register device\n");
+		dev_warn(&pdev->dev, "Failed to register channel %d: %d\n", kcs_bmc->channel, rc);
 		return rc;
 	}
 
@@ -229,12 +225,14 @@ static int npcm7xx_kcs_remove(struct platform_device *pdev)
 
 	kcs_bmc_remove_device(kcs_bmc);
 
+	npcm7xx_kcs_enable_channel(kcs_bmc, false);
+	npcm7xx_kcs_irq_mask_update(kcs_bmc, (KCS_BMC_EVENT_TYPE_IBF | KCS_BMC_EVENT_TYPE_OBE), 0);
+
 	return 0;
 }
 
 static const struct of_device_id npcm_kcs_bmc_match[] = {
 	{ .compatible = "nuvoton,npcm750-kcs-bmc" },
-	{ .compatible = "nuvoton,npcm845-kcs-bmc" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, npcm_kcs_bmc_match);
