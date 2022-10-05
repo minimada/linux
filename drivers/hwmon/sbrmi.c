@@ -3,7 +3,7 @@
  * sbrmi.c - hwmon driver for a SB-RMI mailbox
  *           compliant AMD SoC device.
  *
- * Copyright (C) 2020-2021 Advanced Micro Devices, Inc.
+ * Copyright (C) 2021-2022 Advanced Micro Devices, Inc.
  */
 
 #include <linux/delay.h>
@@ -11,24 +11,24 @@
 #include <linux/hwmon.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
+#include <linux/io.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/fs.h>
+#include <linux/regmap.h>
+#include "sbrmi-common.h"
+
+#define SOCK_0_ADDR	0x3C
+#define SOCK_1_ADDR	0x38
 
 /* Do not allow setting negative power limit */
 #define SBRMI_PWR_MIN	0
-/* Mask for Status Register bit[1] */
-#define SW_ALERT_MASK	0x2
 
-/* Software Interrupt for triggering */
-#define START_CMD	0x80
-#define TRIGGER_MAILBOX	0x01
+/* SBRMI REVISION REG */
+#define SBRMI_REV	0x0
 
-/*
- * SB-RMI supports soft mailbox service request to MP1 (power management
- * firmware) through SBRMI inbound/outbound message registers.
- * SB-RMI message IDs
- */
 enum sbrmi_msg_id {
 	SBRMI_READ_PKG_PWR_CONSUMPTION = 0x1,
 	SBRMI_WRITE_PKG_PWR_LIMIT,
@@ -36,180 +36,29 @@ enum sbrmi_msg_id {
 	SBRMI_READ_PKG_MAX_PWR_LIMIT,
 };
 
-/* SB-RMI registers */
-enum sbrmi_reg {
-	SBRMI_CTRL		= 0x01,
-	SBRMI_STATUS,
-	SBRMI_OUTBNDMSG0	= 0x30,
-	SBRMI_OUTBNDMSG1,
-	SBRMI_OUTBNDMSG2,
-	SBRMI_OUTBNDMSG3,
-	SBRMI_OUTBNDMSG4,
-	SBRMI_OUTBNDMSG5,
-	SBRMI_OUTBNDMSG6,
-	SBRMI_OUTBNDMSG7,
-	SBRMI_INBNDMSG0,
-	SBRMI_INBNDMSG1,
-	SBRMI_INBNDMSG2,
-	SBRMI_INBNDMSG3,
-	SBRMI_INBNDMSG4,
-	SBRMI_INBNDMSG5,
-	SBRMI_INBNDMSG6,
-	SBRMI_INBNDMSG7,
-	SBRMI_SW_INTERRUPT,
-};
-
-/* Each client has this additional data */
-struct sbrmi_data {
-	struct i2c_client *client;
-	struct mutex lock;
-	u32 pwr_limit_max;
-};
-
-struct sbrmi_mailbox_msg {
-	u8 cmd;
-	bool read;
-	u32 data_in;
-	u32 data_out;
-};
-
-static int sbrmi_enable_alert(struct i2c_client *client)
-{
-	int ctrl;
-
-	/*
-	 * Enable the SB-RMI Software alert status
-	 * by writing 0 to bit 4 of Control register(0x1)
-	 */
-	ctrl = i2c_smbus_read_byte_data(client, SBRMI_CTRL);
-	if (ctrl < 0)
-		return ctrl;
-
-	if (ctrl & 0x10) {
-		ctrl &= ~0x10;
-		return i2c_smbus_write_byte_data(client,
-						 SBRMI_CTRL, ctrl);
-	}
-
-	return 0;
-}
-
-static int rmi_mailbox_xfer(struct sbrmi_data *data,
-			    struct sbrmi_mailbox_msg *msg)
-{
-	int i, ret, retry = 10;
-	int sw_status;
-	u8 byte;
-
-	mutex_lock(&data->lock);
-
-	/* Indicate firmware a command is to be serviced */
-	ret = i2c_smbus_write_byte_data(data->client,
-					SBRMI_INBNDMSG7, START_CMD);
-	if (ret < 0)
-		goto exit_unlock;
-
-	/* Write the command to SBRMI::InBndMsg_inst0 */
-	ret = i2c_smbus_write_byte_data(data->client,
-					SBRMI_INBNDMSG0, msg->cmd);
-	if (ret < 0)
-		goto exit_unlock;
-
-	/*
-	 * For both read and write the initiator (BMC) writes
-	 * Command Data In[31:0] to SBRMI::InBndMsg_inst[4:1]
-	 * SBRMI_x3C(MSB):SBRMI_x39(LSB)
-	 */
-	for (i = 0; i < 4; i++) {
-		byte = (msg->data_in >> i * 8) & 0xff;
-		ret = i2c_smbus_write_byte_data(data->client,
-						SBRMI_INBNDMSG1 + i, byte);
-		if (ret < 0)
-			goto exit_unlock;
-	}
-
-	/*
-	 * Write 0x01 to SBRMI::SoftwareInterrupt to notify firmware to
-	 * perform the requested read or write command
-	 */
-	ret = i2c_smbus_write_byte_data(data->client,
-					SBRMI_SW_INTERRUPT, TRIGGER_MAILBOX);
-	if (ret < 0)
-		goto exit_unlock;
-
-	/*
-	 * Firmware will write SBRMI::Status[SwAlertSts]=1 to generate
-	 * an ALERT (if enabled) to initiator (BMC) to indicate completion
-	 * of the requested command
-	 */
-	do {
-		sw_status = i2c_smbus_read_byte_data(data->client,
-						     SBRMI_STATUS);
-		if (sw_status < 0) {
-			ret = sw_status;
-			goto exit_unlock;
-		}
-		if (sw_status & SW_ALERT_MASK)
-			break;
-		usleep_range(50, 100);
-	} while (retry--);
-
-	if (retry < 0) {
-		dev_err(&data->client->dev,
-			"Firmware fail to indicate command completion\n");
-		ret = -EIO;
-		goto exit_unlock;
-	}
-
-	/*
-	 * For a read operation, the initiator (BMC) reads the firmware
-	 * response Command Data Out[31:0] from SBRMI::OutBndMsg_inst[4:1]
-	 * {SBRMI_x34(MSB):SBRMI_x31(LSB)}.
-	 */
-	if (msg->read) {
-		for (i = 0; i < 4; i++) {
-			ret = i2c_smbus_read_byte_data(data->client,
-						       SBRMI_OUTBNDMSG1 + i);
-			if (ret < 0)
-				goto exit_unlock;
-			msg->data_out |= ret << i * 8;
-		}
-	}
-
-	/*
-	 * BMC must write 1'b1 to SBRMI::Status[SwAlertSts] to clear the
-	 * ALERT to initiator
-	 */
-	ret = i2c_smbus_write_byte_data(data->client, SBRMI_STATUS,
-					sw_status | SW_ALERT_MASK);
-
-exit_unlock:
-	mutex_unlock(&data->lock);
-	return ret;
-}
-
 static int sbrmi_read(struct device *dev, enum hwmon_sensor_types type,
 		      u32 attr, int channel, long *val)
 {
-	struct sbrmi_data *data = dev_get_drvdata(dev);
-	struct sbrmi_mailbox_msg msg = { 0 };
+	struct apml_sbrmi_device *rmi_dev = dev_get_drvdata(dev);
+	struct apml_message msg = { 0 };
 	int ret;
 
 	if (type != hwmon_power)
 		return -EINVAL;
 
-	msg.read = true;
+	msg.data_in.reg_in[RD_FLAG_INDEX] = 1;
+
 	switch (attr) {
 	case hwmon_power_input:
 		msg.cmd = SBRMI_READ_PKG_PWR_CONSUMPTION;
-		ret = rmi_mailbox_xfer(data, &msg);
+		ret = rmi_mailbox_xfer(rmi_dev, &msg);
 		break;
 	case hwmon_power_cap:
 		msg.cmd = SBRMI_READ_PKG_PWR_LIMIT;
-		ret = rmi_mailbox_xfer(data, &msg);
+		ret = rmi_mailbox_xfer(rmi_dev, &msg);
 		break;
 	case hwmon_power_cap_max:
-		msg.data_out = data->pwr_limit_max;
+		msg.data_out.mb_out[RD_WR_DATA_INDEX] = rmi_dev->pwr_limit_max;
 		ret = 0;
 		break;
 	default:
@@ -218,15 +67,16 @@ static int sbrmi_read(struct device *dev, enum hwmon_sensor_types type,
 	if (ret < 0)
 		return ret;
 	/* hwmon power attributes are in microWatt */
-	*val = (long)msg.data_out * 1000;
+	*val = (long)msg.data_out.mb_out[RD_WR_DATA_INDEX] * 1000;
+
 	return ret;
 }
 
 static int sbrmi_write(struct device *dev, enum hwmon_sensor_types type,
 		       u32 attr, int channel, long val)
 {
-	struct sbrmi_data *data = dev_get_drvdata(dev);
-	struct sbrmi_mailbox_msg msg = { 0 };
+	struct apml_sbrmi_device *rmi_dev = dev_get_drvdata(dev);
+	struct apml_message msg = { 0 };
 
 	if (type != hwmon_power && attr != hwmon_power_cap)
 		return -EINVAL;
@@ -236,13 +86,13 @@ static int sbrmi_write(struct device *dev, enum hwmon_sensor_types type,
 	 */
 	val /= 1000;
 
-	val = clamp_val(val, SBRMI_PWR_MIN, data->pwr_limit_max);
+	val = clamp_val(val, SBRMI_PWR_MIN, rmi_dev->pwr_limit_max);
 
 	msg.cmd = SBRMI_WRITE_PKG_PWR_LIMIT;
-	msg.data_in = val;
-	msg.read = false;
+	msg.data_in.mb_in[RD_WR_DATA_INDEX] = val;
+	msg.data_in.reg_in[RD_FLAG_INDEX] = 0;
 
-	return rmi_mailbox_xfer(data, &msg);
+	return rmi_mailbox_xfer(rmi_dev, &msg);
 }
 
 static umode_t sbrmi_is_visible(const void *data,
@@ -282,51 +132,187 @@ static const struct hwmon_chip_info sbrmi_chip_info = {
 	.info = sbrmi_info,
 };
 
-static int sbrmi_get_max_pwr_limit(struct sbrmi_data *data)
+static int sbrmi_get_max_pwr_limit(struct apml_sbrmi_device *rmi_dev)
 {
-	struct sbrmi_mailbox_msg msg = { 0 };
+	struct apml_message msg = { 0 };
 	int ret;
 
 	msg.cmd = SBRMI_READ_PKG_MAX_PWR_LIMIT;
-	msg.read = true;
-	ret = rmi_mailbox_xfer(data, &msg);
+	msg.data_in.reg_in[RD_FLAG_INDEX] = 1;
+	ret = rmi_mailbox_xfer(rmi_dev, &msg);
 	if (ret < 0)
 		return ret;
-	data->pwr_limit_max = msg.data_out;
+	rmi_dev->pwr_limit_max = msg.data_out.mb_out[RD_WR_DATA_INDEX];
 
 	return ret;
 }
 
+static int sbrmi_get_rev(struct apml_sbrmi_device *rmi_dev)
+{
+	struct apml_message msg = { 0 };
+	int ret;
+
+	msg.data_in.reg_in[REG_OFF_INDEX] = SBRMI_REV;
+	msg.data_in.reg_in[RD_FLAG_INDEX] = 1;
+	ret = regmap_read(rmi_dev->regmap,
+			  msg.data_in.reg_in[REG_OFF_INDEX],
+			  &msg.data_out.mb_out[RD_WR_DATA_INDEX]);
+	if (ret < 0)
+		return ret;
+
+	rmi_dev->rev = msg.data_out.reg_out[RD_WR_DATA_INDEX];
+	return 0;
+}
+
+static long sbrmi_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
+{
+	int __user *arguser = (int  __user *)arg;
+	struct apml_message msg = { 0 };
+	struct apml_sbrmi_device *rmi_dev;
+	bool read = false;
+	int ret = -EFAULT;
+
+	if (copy_struct_from_user(&msg, sizeof(msg), arguser,
+				  sizeof(struct apml_message)))
+		return ret;
+
+	rmi_dev = container_of(fp->private_data, struct apml_sbrmi_device,
+			       sbrmi_misc_dev);
+	if (!rmi_dev)
+		return ret;
+
+	/* Is this a read/monitor/get request */
+	if (msg.data_in.reg_in[RD_FLAG_INDEX])
+		read = true;
+
+	switch (msg.cmd) {
+	case 0 ... 0x999:
+		ret = rmi_mailbox_xfer(rmi_dev, &msg);
+		if (ret && ret != -EPROTOTYPE)
+			return ret;
+		break;
+	case APML_CPUID:
+		ret = apml_ops.rmi_cpuid_read(rmi_dev, &msg);
+		if (ret && ret != -EPROTOTYPE)
+			return ret;
+		break;
+	case APML_MCA_MSR:
+		ret = apml_ops.rmi_mca_msr_read(rmi_dev, &msg);
+		if (ret && ret != -EPROTOTYPE)
+			return ret;
+		break;
+	case APML_REG:
+		if (read) {
+			ret = regmap_read(rmi_dev->regmap,
+					  msg.data_in.reg_in[REG_OFF_INDEX],
+					  &msg.data_out.mb_out[RD_WR_DATA_INDEX]);
+			if (ret)
+				return ret;
+		} else {
+			return regmap_write(rmi_dev->regmap,
+					    msg.data_in.reg_in[REG_OFF_INDEX],
+					    msg.data_in.reg_in[REG_VAL_INDEX]);
+		}
+		break;
+	default:
+		return ret;
+	}
+
+	/* Copy results back to user only for get/monitor commands and firmware failures */
+	if (read || ret == -EPROTOTYPE) {
+		if (copy_to_user(arguser, &msg, sizeof(struct apml_message)))
+			return -EFAULT;
+	}
+	return ret;
+}
+
+static const struct file_operations sbrmi_fops = {
+	.owner		= THIS_MODULE,
+	.unlocked_ioctl	= sbrmi_ioctl,
+	.compat_ioctl	= sbrmi_ioctl,
+};
+
+static int create_misc_rmi_device(struct apml_sbrmi_device *rmi_dev,
+				  struct device *dev, int id)
+{
+	int ret;
+
+	rmi_dev->sbrmi_misc_dev.name		= devm_kasprintf(dev, GFP_KERNEL, "apml_rmi%d", id);
+	rmi_dev->sbrmi_misc_dev.minor		= MISC_DYNAMIC_MINOR;
+	rmi_dev->sbrmi_misc_dev.fops		= &sbrmi_fops;
+	rmi_dev->sbrmi_misc_dev.parent		= dev;
+	rmi_dev->sbrmi_misc_dev.nodename	= devm_kasprintf(dev, GFP_KERNEL, "sbrmi%d", id);
+	rmi_dev->sbrmi_misc_dev.mode		= 0600;
+
+	ret = misc_register(&rmi_dev->sbrmi_misc_dev);
+	if (ret)
+		return ret;
+
+	dev_info(dev, "register %s device\n", rmi_dev->sbrmi_misc_dev.name);
+	return ret;
+}
+
 static int sbrmi_probe(struct i2c_client *client,
-		       const struct i2c_device_id *id)
+		       const struct i2c_device_id *rmi_id)
 {
 	struct device *dev = &client->dev;
 	struct device *hwmon_dev;
-	struct sbrmi_data *data;
-	int ret;
+	struct apml_sbrmi_device *rmi_dev;
+	struct regmap_config sbrmi_i2c_regmap_config = {
+		.reg_bits = 8,
+		.val_bits = 8,
+	};
 
-	data = devm_kzalloc(dev, sizeof(struct sbrmi_data), GFP_KERNEL);
-	if (!data)
+	int id, ret;
+
+	rmi_dev = devm_kzalloc(dev, sizeof(struct apml_sbrmi_device), GFP_KERNEL);
+	if (!rmi_dev)
 		return -ENOMEM;
 
-	data->client = client;
-	mutex_init(&data->lock);
+	mutex_init(&rmi_dev->lock);
+	rmi_dev->regmap = devm_regmap_init_i2c(client, &sbrmi_i2c_regmap_config);
+	if (IS_ERR(rmi_dev->regmap))
+		return PTR_ERR(rmi_dev->regmap);
 
-	/* Enable alert for SB-RMI sequence */
-	ret = sbrmi_enable_alert(client);
+	dev_set_drvdata(dev, (void *)rmi_dev);
+
+	ret = sbrmi_get_rev(rmi_dev);
 	if (ret < 0)
 		return ret;
+
+	rmi_set_apml_ops(rmi_dev->rev);
 
 	/* Cache maximum power limit */
-	ret = sbrmi_get_max_pwr_limit(data);
+	ret = sbrmi_get_max_pwr_limit(rmi_dev);
 	if (ret < 0)
 		return ret;
 
-	hwmon_dev = devm_hwmon_device_register_with_info(dev, client->name, data,
-							 &sbrmi_chip_info, NULL);
+	hwmon_dev = devm_hwmon_device_register_with_info(dev, client->name,
+							 rmi_dev,
+							 &sbrmi_chip_info,
+							 NULL);
 
-	return PTR_ERR_OR_ZERO(hwmon_dev);
+	if (!hwmon_dev)
+		return PTR_ERR_OR_ZERO(hwmon_dev);
+
+	if (client->addr == SOCK_0_ADDR)
+		id = 0;
+	if (client->addr == SOCK_1_ADDR)
+		id = 1;
+
+	return create_misc_rmi_device(rmi_dev, dev, id);
 }
+
+static void sbrmi_i2c_remove(struct i2c_client *client)
+{
+	struct apml_sbrmi_device *rmi_dev = dev_get_drvdata(&client->dev);
+
+	if (rmi_dev)
+		misc_deregister(&rmi_dev->sbrmi_misc_dev);
+
+	dev_info(&client->dev, "Removed sbrmi driver\n");
+}
+
 
 static const struct i2c_device_id sbrmi_id[] = {
 	{"sbrmi", 0},
@@ -342,6 +328,7 @@ static const struct of_device_id __maybe_unused sbrmi_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, sbrmi_of_match);
 
+
 static struct i2c_driver sbrmi_driver = {
 	.class = I2C_CLASS_HWMON,
 	.driver = {
@@ -349,6 +336,7 @@ static struct i2c_driver sbrmi_driver = {
 		.of_match_table = of_match_ptr(sbrmi_of_match),
 	},
 	.probe = sbrmi_probe,
+	.remove = sbrmi_i2c_remove,
 	.id_table = sbrmi_id,
 };
 
