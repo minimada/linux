@@ -645,11 +645,13 @@ stmmac_probe_config_dt(struct platform_device *pdev, u8 *mac)
 	if (of_device_is_compatible(np, "snps,npcm")) {
 		struct gpio_desc *gpio_evb_id[2];
 		u32 evb_id[2] = {0};
+		int sgmii_an;
 
 		base = devm_platform_ioremap_resource(pdev, 1);
 		if (IS_ERR(base)) {
 			dev_warn(&pdev->dev, "devm_platform_ioremap_resource failed\n");
 		}
+		sgmii_an = of_property_read_bool(np, "npcm,sgmii-an");
 		iowrite16((u16)(SR_MII_CTRL >> 9), base + IND_AC_INDX);
 		RegValue = ioread16(base + 0x2);
 		RegValue = ioread16(base + 0x0);
@@ -657,8 +659,26 @@ stmmac_probe_config_dt(struct platform_device *pdev, u8 *mac)
 		iowrite16(RegValue, base + 0x0);
 		while (RegValue & BIT(15))
 			RegValue = ioread16(base + 0x0);
-		RegValue &= ~(BIT(12));
-		iowrite16(RegValue, base + 0x0);
+
+		if (!sgmii_an) {
+			/* Disable auto-negotiation */
+			RegValue &= ~(BIT(12));
+			iowrite16(RegValue, base + 0x0);
+		} else {
+			/* Change control to MII CTRL1 */
+			iowrite16((u16)(SR_MII_CTRL1 >> 9), base + IND_AC_INDX);
+
+			/* Set PCS_Mode to SGMII */
+			RegValue = ioread16(base + 0x2);
+			RegValue &= ~GENMASK(2,1);
+			RegValue |= 0x04;
+			iowrite16(RegValue, base + 0x2);
+
+			/* Set auto speed change */
+			RegValue = ioread16(base + 0x0);
+			RegValue |= BIT(9);
+			iowrite16(RegValue, base + 0x0);
+		}
 
 		gpio_evb_id[0] = devm_gpiod_get_index(&pdev->dev, NULL, 0, GPIOD_IN);
 		gpio_evb_id[1] = devm_gpiod_get_index(&pdev->dev, NULL, 1, GPIOD_IN);
