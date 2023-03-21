@@ -37,9 +37,9 @@ Aliases:
 
   In the NPCM8XX BMC:
   		fiu0 represent fiu 0 controller
-  		fiu1 represent fiu 1 controller
-  		fiu2 represent fiu 3 controller
-  		fiu3 represent fiu x controller
+  		fiu1 represent fiu 3 controller
+  		fiu2 represent fiu x controller
+        fiu3 represent fiu 1 controller
 
 Example:
 fiu3: spi@c00000000 {
