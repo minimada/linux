@@ -26,9 +26,9 @@
 		udc6 = &udc6;
 		udc7 = &udc7;
 		fiu0 = &fiu0;
-		fiu1 = &fiu1;
-		fiu2 = &fiu3;
-		fiu3 = &fiux;
+		fiu1 = &fiu3;
+		fiu2 = &fiux;
+		fiu3 = &fiu1;
 		i2c0 = &i2c0;
 		i2c1 = &i2c1;
 		i2c2 = &i2c2;
