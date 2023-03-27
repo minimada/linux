@@ -25,13 +25,19 @@ struct i2c_mux_npcm {
 static int i2c_mux_npcm_select(struct i2c_mux_core *muxc, u32 chan)
 {
 	struct i2c_mux_npcm *mux = i2c_mux_priv(muxc);
-	u32 smb_ch = mux->i2c_segment[chan] << (mux->i2c_number * 2);
+	u32 smb_ch = 0;
 	u32 smbxss = 0;
 
 	/* Adding WENxSS */
-	smbxss |= BIT(mux->i2c_number + 12);
+	if (mux->i2c_number < 6)
+		smbxss = BIT(mux->i2c_number + 12) | 
+			(mux->i2c_segment[chan] << (mux->i2c_number * 2));
+	if (mux->i2c_number == 6)
+		smbxss = BIT(28) | (mux->i2c_segment[chan] << 26);
+	if (mux->i2c_number == 7)
+		smbxss = BIT(31) | (mux->i2c_segment[chan] << 29);
+
 	/* Setting smb segment select */
-	smbxss |= smb_ch;
 	regmap_write(mux->gcr_regmap, NPCM_GCR_I2CSEGCTL, smbxss);
 	return 0;
 }
