@@ -20,11 +20,11 @@
 			slew-rate = <1>;
 		};
 		pin33_slew: pin33-slew {
-			pins = "I3C4_SCL";
+			pins = "GPIO33/I3C4_SCL";
 			slew-rate = <1>;
 		};
 		pin34_slew: pin34-slew {
-			pins = "I3C4_SDA";
+			pins = "GPIO34/I3C4_SDA";
 			slew-rate = <1>;
 		};
 		pin106_slew: pin106-slew {
