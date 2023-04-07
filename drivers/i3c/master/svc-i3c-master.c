@@ -14,6 +14,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
 #include <linux/i3c/master.h>
+#include <linux/i3c/target.h>
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/list.h>
@@ -23,6 +24,45 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+
+/* Slave Mode Registers */
+#define SVC_I3C_CONFIG      0x004
+#define   SVC_I3C_CONFIG_SLVEN BIT(0)
+#define SVC_I3C_STATUS      0x008
+#define   SVC_I3C_STATUS_RXPEND(x) FIELD_GET(SVC_I3C_INT_RXPEND, (x))
+#define   SVC_I3C_STATUS_STREQWR(x) (x & BIT(4))
+#define   SVC_I3C_STATUS_STOP BIT(10)
+#define SVC_I3C_CTRL        0x00C
+#define   SVC_I3C_CTRL_EVENT(x) FIELD_PREP(GENMASK(1, 0), (x))
+#define   SVC_I3C_CTRL_EVENT_HOT_JOIN 3
+#define   SVC_I3C_CTRL_PENDINT(x) FIELD_PREP(GENMASK(19, 16), (x))
+#define SVC_I3C_INTSET      0x010
+#define   SVC_I3C_INT_STOP BIT(10)
+#define   SVC_I3C_INT_RXPEND BIT(11)
+#define   SVC_I3C_INT_TXNOTFULL BIT(12)
+#define SVC_I3C_INTCLR      0x014
+#define SVC_I3C_INTMASKED   0x018
+#define SVC_I3C_ERRWARN     0x01C
+#define SVC_I3C_DMACTRL     0x020
+#define   SVC_I3C_DMACTRL_DMAFB(x) FIELD_PREP(GENMASK(1, 0), (x))
+#define   SVC_I3C_DMACTRL_DMATB(x) FIELD_PREP(GENMASK(3, 2), (x))
+#define   SVC_I3C_DMACTRL_DMAWIDTH(x) FIELD_PREP(GENMASK(5, 4), (x))
+#define SVC_I3C_DATACTRL    0x02C
+#define   SVC_I3C_DATACTRL_FLUSHTB BIT(0)
+#define   SVC_I3C_DATACTRL_FLUSHRB BIT(1)
+#define   SVC_I3C_DATACTRL_TXFULL BIT(30)
+#define   SVC_I3C_DATACTRL_TXCOUNT(x) FIELD_GET(GENMASK(20, 16), (x))
+#define   SVC_I3C_DATACTRL_RXCOUNT(x) FIELD_GET(GENMASK(28, 24), (x))
+#define SVC_I3C_WDATAB      0x030
+#define SVC_I3C_WDATABE     0x034
+#define SVC_I3C_RDATAB      0x040
+#define SVC_I3C_MAXLIMITS   0x068
+#define   SVC_I3C_MAXLIMITS_MAXWR(x) FIELD_PREP(GENMASK(27, 16), (x))
+#define   SVC_I3C_MAXLIMITS_MAXRD(x) FIELD_PREP(GENMASK(11, 0), (x))
+#define SVC_I3C_PARTNO      0x06C
+#define SVC_I3C_IDEXT       0x070
+#define   SVC_I3C_IDEXT_BCR(x) FIELD_PREP(GENMASK(23 16), (x))
+#define   SVC_I3C_IDEXT_DCR(x) FIELD_PREP(GENMASK(15, 8), (x))
 
 /* Master Mode Registers */
 #define SVC_I3C_MCONFIG      0x000
@@ -96,6 +136,7 @@
 #define SVC_I3C_MINTCLR      0x094
 #define SVC_I3C_MINTMASKED   0x098
 #define SVC_I3C_MERRWARN     0x09C
+#define   SVC_I3C_MERRWARN_NACK(x) FIELD_GET(BIT(2), (x))
 #define SVC_I3C_MDMACTRL     0x0A0
 #define   SVC_I3C_MDMACTRL_DMAFB(x) FIELD_PREP(GENMASK(1, 0), (x))
 #define   SVC_I3C_MDMACTRL_DMATB(x) FIELD_PREP(GENMASK(3, 2), (x))
@@ -232,10 +273,17 @@ struct svc_i3c_master {
 		spinlock_t lock;
 	} ibi;
 	struct dentry *debugfs;
+
+	struct {
+		struct svc_i3c_xfer *cur;
+		struct svc_i3c_xfer *pending_rd;
+		spinlock_t lock;
+	} slave;
+
 	/* For DMA */
 	void __iomem *dma_regs;
 	void __iomem *dma_mux_regs;
-	bool support_dma;
+	bool use_dma;
 	struct completion xfer_comp;
 	char *dma_tx_buf;
 	char *dma_rx_buf;
@@ -1011,6 +1059,10 @@ rpm_out:
 	pm_runtime_mark_last_busy(master->dev);
 	pm_runtime_put_autosuspend(master->dev);
 
+	/* No Slave ACK */
+	if (ret == -EIO)
+		return 0;
+
 	return ret;
 }
 
@@ -1287,6 +1339,10 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 	return 0;
 
 emit_stop:
+	reg = readl(master->regs + SVC_I3C_MERRWARN);
+	if (SVC_I3C_MERRWARN_NACK(reg))
+		ret = I3C_ERROR_M2;
+
 	if (use_dma)
 		svc_i3c_master_stop_dma(master);
 	else
@@ -1541,7 +1597,7 @@ static int svc_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 		cmd->len = xfers[i].len;
 		cmd->read_len = xfers[i].rnw ? xfers[i].len : 0;
 		cmd->continued = (i + 1) < nxfers;
-		if (master->support_dma && xfers[i].len > 1)
+		if (master->use_dma && xfers[i].len > 1)
 			cmd->use_dma = true;
 	}
 
@@ -1746,6 +1802,284 @@ static void svc_i3c_master_unprepare_clks(struct svc_i3c_master *master)
 	clk_disable_unprepare(master->sclk);
 }
 
+static void svc_i3c_slave_enable_interrupts(struct svc_i3c_master *master,
+					    bool enable)
+{
+	/* Use STOP condition to check the end of transaction */
+	if (enable)
+		writel(SVC_I3C_INT_STOP, master->regs + SVC_I3C_INTSET);
+	else
+		writel(SVC_I3C_INT_STOP, master->regs + SVC_I3C_INTCLR);
+}
+
+static void svc_i3c_slave_stop_dma(struct svc_i3c_master *master)
+{
+	writel(0, master->dma_regs + NPCM_GDMA_CTL(DMA_CH_TX));
+	writel(0, master->dma_regs + NPCM_GDMA_CTL(DMA_CH_RX));
+	writel(0, master->regs + SVC_I3C_MDMACTRL);
+}
+
+static int svc_i3c_slave_start_dma(struct svc_i3c_master *master,
+				   struct svc_i3c_xfer *xfer)
+{
+	struct svc_i3c_cmd *cmd = &xfer->cmds[0];
+	int ch = cmd->rnw ? DMA_CH_RX : DMA_CH_TX;
+	u32 val;
+
+	if (!cmd->len)
+		return 0;
+
+	dev_dbg(master->dev, "slave start dma for %s, count %d\n",
+		cmd->rnw ? "R" : "W", cmd->len);
+
+	/* Set DMA transfer count */
+	writel(cmd->len, master->dma_regs + NPCM_GDMA_TCNT(ch));
+
+	/* Write data to DMA TX table */
+	if (ch == DMA_CH_TX)
+		svc_i3c_master_write_dma_table(cmd->out,
+					       (u32 *)master->dma_tx_buf,
+					       cmd->len);
+
+	/*
+	 * Setup I3C DMA control
+	 * 1 byte DMA width
+	 * Enable DMA util dsiabled
+	 */
+	val = SVC_I3C_DMACTRL_DMAWIDTH(1);
+	val |= (ch == DMA_CH_RX) ? SVC_I3C_DMACTRL_DMAFB(2) : SVC_I3C_DMACTRL_DMATB(2);
+	writel(val, master->regs + SVC_I3C_DMACTRL);
+
+	/* Clear STOP status because this will be used as check point of transaction end */
+	writel(SVC_I3C_STATUS_STOP, master->regs + SVC_I3C_STATUS);
+
+	/*
+	 * Enable DMA
+	 * Source Address Fixed for RX
+	 * Destination Address Fixed for TX
+	 * Use 32-bit transfer width for TX (queal to MWDATAB register width)
+	 */
+	val = NPCM_GDMA_CTL_GDMAEN;
+	if (ch == DMA_CH_RX)
+		val |= NPCM_GDMA_CTL_SAFIX | NPCM_GDMA_CTL_GDMAMS(2);
+	else
+		val |= NPCM_GDMA_CTL_DAFIX | NPCM_GDMA_CTL_GDMAMS(1) | NPCM_GDMA_CTL_TWS(2);
+	writel(val, master->dma_regs + NPCM_GDMA_CTL(ch));
+
+	return 0;
+}
+
+static void svc_i3c_slave_check_complete(struct svc_i3c_master *master)
+{
+	struct svc_i3c_xfer *xfer = master->slave.cur;
+	struct svc_i3c_cmd *cmd = &xfer->cmds[0];
+	int ch = cmd->rnw ? DMA_CH_RX : DMA_CH_TX;
+	u32 count, reg;
+
+	/* Get the DMA transfer count */
+	count = readl(master->dma_regs + NPCM_GDMA_CTCNT(ch));
+
+	/* No rx data transferred */
+	if (cmd->rnw && cmd->len == count)
+		return;
+
+	/* No tx data transferred */
+	if (!cmd->rnw) {
+		reg = readl(master->regs + SVC_I3C_DATACTRL);
+		if (cmd->len == count + SVC_I3C_DATACTRL_TXCOUNT(reg))
+			return;
+	}
+	svc_i3c_slave_stop_dma(master);
+
+	if (cmd->len < count)
+		goto quit;
+	count = cmd->len - count;
+	if (cmd->rnw) {
+		struct i3c_dev_desc *desc = master->base.this;
+
+		memcpy(cmd->in, master->dma_rx_buf, count);
+		dev_dbg(master->dev, "slave rx count %u\n", count);
+		if (desc->target_info.read_handler)
+			desc->target_info.read_handler(desc->dev, cmd->in, count);
+	} else {
+		cmd->len = count - SVC_I3C_DATACTRL_TXCOUNT(reg);
+		/* Clear Pending Intr */
+		writel(0, master->regs + SVC_I3C_CTRL);
+		dev_dbg(master->dev, "slave tx count %u\n", cmd->len);
+		complete(&xfer->comp);
+	}
+quit:
+	if (master->slave.pending_rd) {
+		master->slave.cur = master->slave.pending_rd;
+		svc_i3c_slave_start_dma(master, master->slave.cur);
+	} else {
+		master->slave.cur = NULL;
+		svc_i3c_slave_enable_interrupts(master, false);
+	}
+}
+
+static irqreturn_t svc_i3c_slave_irq_handler(int irq, void *dev_id)
+{
+	struct svc_i3c_master *master = (struct svc_i3c_master *)dev_id;
+	u32 active = readl(master->regs + SVC_I3C_INTMASKED);
+	u32 status = readl(master->regs + SVC_I3C_STATUS);
+
+	if ((active & SVC_I3C_INT_STOP) && (status & SVC_I3C_INT_STOP)) {
+		writel(SVC_I3C_STATUS_STOP, master->regs + SVC_I3C_STATUS);
+		if (master->slave.cur)
+			svc_i3c_slave_check_complete(master);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static int svc_i3c_slave_write(struct i3c_master_controller *m,
+			       struct svc_i3c_xfer *xfer)
+{
+	struct svc_i3c_master *master = to_svc_i3c_master(m);
+	int ret;
+	unsigned long flags;
+
+	spin_lock_irqsave(&master->slave.lock, flags);
+	if (master->slave.cur)
+		svc_i3c_slave_stop_dma(master);
+	writel(SVC_I3C_DATACTRL_FLUSHTB, master->regs + SVC_I3C_DATACTRL);
+	master->slave.cur = xfer;
+
+	init_completion(&xfer->comp);
+	svc_i3c_slave_start_dma(master, xfer);
+	svc_i3c_slave_enable_interrupts(master, true);
+
+	/*
+	 * Set Pending Intr in GetStatus response to inform that
+	 * slave has data to send.
+	 */
+	writel(SVC_I3C_CTRL_PENDINT(1), master->regs + SVC_I3C_CTRL);
+	spin_unlock_irqrestore(&master->slave.lock, flags);
+
+	ret = wait_for_completion_timeout(&xfer->comp,
+					  msecs_to_jiffies(3000));
+	if (!ret) {
+		/* Clear Pending Intr */
+		writel(0, master->regs + SVC_I3C_CTRL);
+
+		spin_lock_irqsave(&master->slave.lock, flags);
+		svc_i3c_slave_stop_dma(master);
+		if (master->slave.pending_rd) {
+			master->slave.cur = master->slave.pending_rd;
+			svc_i3c_slave_start_dma(master, master->slave.cur);
+		} else {
+			master->slave.cur = NULL;
+			svc_i3c_slave_enable_interrupts(master, false);
+		}
+		spin_unlock_irqrestore(&master->slave.lock, flags);
+		dev_info(master->dev, "slave write timeout\n");
+		xfer->ret = -ETIMEDOUT;
+		return -ETIMEDOUT;
+	}
+
+	xfer->ret = 0;
+	return 0;
+}
+
+static int svc_i3c_slave_priv_xfers(struct i3c_dev_desc *dev,
+				    struct i3c_priv_xfer *xfers,
+				    int nxfers)
+{
+	struct i3c_master_controller *m = i3c_dev_get_master(dev);
+	struct svc_i3c_master *master = to_svc_i3c_master(m);
+	struct svc_i3c_xfer *xfer;
+	struct svc_i3c_cmd *cmd;
+	int ret;
+
+	/* Only support one write transfer */
+	if (nxfers != 1 || xfers[0].rnw)
+		return -EOPNOTSUPP;
+
+	if (master->slave.cur && master->slave.cur != master->slave.pending_rd)
+		return -EBUSY;
+
+	xfer = svc_i3c_master_alloc_xfer(master, nxfers);
+	if (!xfer)
+		return -ENOMEM;
+
+	cmd = &xfer->cmds[0];
+	cmd->rnw = false;
+	cmd->out = xfers[0].data.out;
+	cmd->len = xfers[0].len;
+	svc_i3c_slave_write(m, xfer);
+
+	ret = xfer->ret;
+	svc_i3c_master_free_xfer(xfer);
+
+	return ret;
+}
+
+static int svc_i3c_slave_bus_init(struct i3c_master_controller *m)
+{
+	struct svc_i3c_master *master = to_svc_i3c_master(m);
+	struct i3c_dev_desc *desc = m->this;
+	u32 partno = (u32)desc->info.pid;
+	struct svc_i3c_xfer *xfer;
+	struct svc_i3c_cmd *cmd;
+	u32 reg;
+
+	if (!master->use_dma)
+		return -ENOTSUPP;
+
+	/* Set dcr/partno */
+	writel(SVC_I3C_IDEXT_DCR(desc->info.dcr), master->regs + SVC_I3C_IDEXT);
+	writel(partno, master->regs + SVC_I3C_PARTNO);
+
+	/* Set max rd/wr length */
+	reg = SVC_I3C_MAXLIMITS_MAXRD(MAX_DMA_COUNT) |
+		SVC_I3C_MAXLIMITS_MAXWR(MAX_DMA_COUNT);
+	writel(reg, master->regs + SVC_I3C_MAXLIMITS);
+
+	/* Enable slave mode */
+	reg = readl(master->regs + SVC_I3C_CONFIG);
+	reg |= SVC_I3C_CONFIG_SLVEN;
+	writel(reg, master->regs + SVC_I3C_CONFIG);
+
+	/* Prepare one RX transfer */
+	xfer = svc_i3c_master_alloc_xfer(master, 1);
+	if (!xfer)
+		return -ENOMEM;
+
+	cmd = &xfer->cmds[0];
+	cmd->rnw = true;
+	cmd->len = MAX_DMA_COUNT;
+	cmd->in = kzalloc(MAX_DMA_COUNT, GFP_KERNEL);
+	if (!cmd->in) {
+		svc_i3c_master_free_xfer(xfer);
+		return -ENOMEM;
+	}
+	master->slave.pending_rd = xfer;
+	master->slave.cur = xfer;
+	svc_i3c_slave_start_dma(master, xfer);
+	svc_i3c_slave_enable_interrupts(master, true);
+
+	return 0;
+}
+
+static void svc_i3c_slave_bus_cleanup(struct i3c_master_controller *m)
+{
+	struct svc_i3c_master *master = to_svc_i3c_master(m);
+	u32 reg;
+
+	svc_i3c_slave_enable_interrupts(master, false);
+
+	reg = readl(master->regs + SVC_I3C_CONFIG);
+	reg &= ~SVC_I3C_CONFIG_SLVEN;
+	writel(reg, master->regs + SVC_I3C_CONFIG);
+}
+
+static const struct i3c_target_ops svc_i3c_slave_ops = {
+	.bus_init = svc_i3c_slave_bus_init,
+	.bus_cleanup = svc_i3c_slave_bus_cleanup,
+	.priv_xfers = svc_i3c_slave_priv_xfers,
+};
+
 static struct dentry *svc_i3c_debugfs_dir;
 static int debug_show(struct seq_file *seq, void *v)
 {
@@ -1821,7 +2155,7 @@ static int svc_i3c_setup_dma(struct platform_device *pdev, struct svc_i3c_master
 	 * channel 0: I3C TX, channel 1: I3C RX
 	 */
 	writel(0x00600060 | (dma_conn + 1) << 16 | dma_conn, master->dma_mux_regs);
-	master->support_dma = true;
+	master->use_dma = true;
 	dev_info(dev, "Using DMA (mux %d)\n", dma_conn);
 
 	of_property_read_u32_index(dev->of_node, "reg", 0, &reg_base);
@@ -1845,6 +2179,7 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct svc_i3c_master *master;
+	const char *role;
 	int ret;
 
 	master = devm_kzalloc(dev, sizeof(*master), GFP_KERNEL);
@@ -1879,8 +2214,13 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 
 	INIT_WORK(&master->hj_work, svc_i3c_master_hj_work);
 	INIT_WORK(&master->ibi_work, svc_i3c_master_ibi_work);
-	ret = devm_request_irq(dev, master->irq, svc_i3c_master_irq_handler,
-			       IRQF_NO_SUSPEND, "svc-i3c-irq", master);
+	ret = of_property_read_string(pdev->dev.of_node, "initial-role", &role);
+	if (!ret && !strcmp("target", role))
+		ret = devm_request_irq(dev, master->irq, svc_i3c_slave_irq_handler,
+				       IRQF_NO_SUSPEND, "svc-i3c-irq", master);
+	else
+		ret = devm_request_irq(dev, master->irq, svc_i3c_master_irq_handler,
+				       IRQF_NO_SUSPEND, "svc-i3c-irq", master);
 	if (ret)
 		goto err_disable_clks;
 
@@ -1890,6 +2230,7 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&master->xferqueue.list);
 
 	spin_lock_init(&master->ibi.lock);
+	spin_lock_init(&master->slave.lock);
 	master->ibi.num_slots = SVC_I3C_MAX_DEVS;
 	master->ibi.slots = devm_kcalloc(&pdev->dev, master->ibi.num_slots,
 					 sizeof(*master->ibi.slots),
@@ -1913,8 +2254,8 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 	svc_i3c_init_debugfs(pdev, master);
 
 	/* Register the master */
-	ret = i3c_master_register(&master->base, &pdev->dev,
-				  &svc_i3c_master_ops, false);
+	ret = i3c_register(&master->base, &pdev->dev,
+			   &svc_i3c_master_ops, &svc_i3c_slave_ops, false);
 	if (ret)
 		goto rpm_disable;
 
@@ -1943,14 +2284,14 @@ static int svc_i3c_master_remove(struct platform_device *pdev)
 
 	debugfs_remove_recursive(master->debugfs);
 
-	ret = i3c_master_unregister(&master->base);
+	ret = i3c_unregister(&master->base);
 	if (ret)
 		return ret;
 
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 
-	if (master->support_dma) {
+	if (master->use_dma) {
 		dma_free_coherent(master->dev, MAX_DMA_COUNT * 4, master->dma_tx_buf,
 				  master->dma_tx_addr);
 		dma_free_coherent(master->dev, MAX_DMA_COUNT, master->dma_rx_buf,
