@@ -58,11 +58,11 @@
 #define TRSL_ID_PCIE_CONFIG  1 
 #define RCA_WIN_EN	     BIT(0)
 
-#define PLDA_XPRESS_RICH_MEMORY_WINDOW 	0
-#define PLDA_XPRESS_RICH_CONFIG_WINDOW 	1
-#define PLDA_XPRESS_RICH_IO_WINDOW 		2
-//#define PLDA_XPRESS_RICH_IO_WINDOW 		1
-#define PLDA_XPRESS_RICH_MESSAGE_WINDOW	4
+#define PLDA_XPRESS_RICH_MEMORY_WINDOW		0
+#define PLDA_XPRESS_RICH_CONFIG_WINDOW		1
+#define PLDA_XPRESS_RICH_IO_WINDOW		2
+//#define PLDA_XPRESS_RICH_IO_WINDOW		1
+#define PLDA_XPRESS_RICH_MESSAGE_WINDOW		4
 
 #define PLDA_XPRESS_RICH_TARGET_PCI_TX_RX	0
 #define PLDA_XPRESS_RICH_TARGET_PCI_CONFIG	1
@@ -74,9 +74,6 @@
 
 #define PCI_RC_ATTR_TRSF_PARAM_POS		16
 #define PCI_RC_ATTR_TRSL_ID_POS			0
-
-#define PCI_RC_MAX_AXI_PCI_WIN			5
-#define PCI_RC_MAX_PCI_AXI_WIN			2
 
 #define IRQ_REQUEST
 #define PCI_BAR_REG 0x10
@@ -102,6 +99,11 @@
 
 #define NPCM_MSI_MAX		32
 
+struct npcm_pci_info {
+	u32 axi_pci_win_max;
+	u32 pci_axi_win_max;
+};
+
 struct npcm_pcie {
 	u32 			irq;
 	u32 			bar0;
@@ -113,8 +115,20 @@ struct npcm_pcie {
 	struct irq_domain 	*msi_domain;
 	struct reset_control	*reset;
 	struct regmap		*gcr_regmap;
+	int 			rst_rc_gpio;
 	int 			rst_ep_gpio;
+	const struct 		npcm_pci_info *data;
 	DECLARE_BITMAP(msi_irq_in_use, NPCM_MSI_MAX);
+};
+
+static const struct npcm_pci_info npxm7xx_pci_info = {
+	.axi_pci_win_max = 4,
+	.pci_axi_win_max = 1
+};
+
+static const struct npcm_pci_info npxm8xx_pci_info = {
+	.axi_pci_win_max = 5,
+	.pci_axi_win_max = 2
 };
 
 static void npcm_msi_isr(struct irq_desc *desc)
@@ -263,16 +277,17 @@ static int npcm_pcie_rc_device_connected(struct npcm_pcie *pcie)
 	return  ((val & LINK_UP_FIELD) >> 20); 
 }
 
-static void npcm_initialize_as_root_complex(struct npcm_pcie *pcie)
+static void npcm_initialize_as_root_complex(struct npcm_pcie *pcie, bool bmc_npcm7xx)
 { 
 	/* put RC core to reset (write 0 to enter reset and 1 to release) */
 	regmap_write_bits(pcie->gcr_regmap, INTCR3, INTCR3_RCCORER_BIT, 0x0);
 
-	regmap_write_bits(pcie->gcr_regmap, MFSEL3,
-			  MFSEL3_PCIEPUSE_BIT, MFSEL3_PCIEPUSE_BIT);
-
 	/* put RC to reset (write 1 to enter reset and 0 to enable module) */
 	reset_control_assert(pcie->reset);
+
+	if (bmc_npcm7xx)
+		regmap_write_bits(pcie->gcr_regmap, MFSEL3,
+				  MFSEL3_PCIEPUSE_BIT, MFSEL3_PCIEPUSE_BIT);
 
 	/* release RC from reset */
 	regmap_write_bits(pcie->gcr_regmap, INTCR3,
@@ -342,7 +357,7 @@ static void npcm_pcie_rc_init_config_window(struct npcm_pcie *pcie)
 		unsigned long size;
 		int bit_size;
 
-		if (start_win_num > PCI_RC_MAX_AXI_PCI_WIN)
+		if (start_win_num > pcie->data->axi_pci_win_max)
 			continue;
 
 		size = range.size;
@@ -373,7 +388,7 @@ static void npcm_pcie_rc_init_config_window(struct npcm_pcie *pcie)
 	for_each_of_pci_range(&parser, &range) {
 		start_win_num = 0;
 
-		if (start_win_num > PCI_RC_MAX_PCI_AXI_WIN)
+		if (start_win_num > pcie->data->pci_axi_win_max)
 			continue;
 		set_translation_window(pcie, start_win_num, range.cpu_addr, 
 				       range.size , range.pci_addr,
@@ -468,7 +483,11 @@ static struct pci_ops npcm_pcie_ops = {
 static int npcm_pcie_init(struct device *dev, struct npcm_pcie *pcie)
 {
 	struct device_node *np = dev->of_node;
-	int ret = -1;
+	bool bmc_npcm7xx = false;
+	int ret;
+
+	if (of_device_is_compatible(np, "nuvoton,npcm750-pcie"))
+		bmc_npcm7xx = true;
 
 	pcie->rst_ep_gpio = of_get_named_gpio(np, "npcm-pci-ep-rst", 0);
 	if (pcie->rst_ep_gpio < 0) {
@@ -477,16 +496,42 @@ static int npcm_pcie_init(struct device *dev, struct npcm_pcie *pcie)
 		ret = devm_gpio_request_one(dev, pcie->rst_ep_gpio,
 					    GPIOF_OUT_INIT_LOW, "rst-ep-pci");
 		if (ret) {
-			dev_err(dev, "%d unable to get reset ep GPIO\n", ret);
+			dev_err(dev, "unable to get reset ep GPIO %d\n", ret);
 			return ret;
 		}
-		gpio_set_value(pcie->rst_ep_gpio, 0);
+		gpio_set_value(pcie->rst_rc_gpio, 0);
 	}
 
-	npcm_initialize_as_root_complex(pcie);
+	if (bmc_npcm7xx) {
+		pcie->rst_rc_gpio = of_get_named_gpio(np, "npcm-pci-rc-rst", 0);
+		if (pcie->rst_rc_gpio < 0) {
+			dev_warn(dev, "GPIO pci-rc-rst not found in device tree\n");
+		} else {
+			ret = devm_gpio_request_one(dev, pcie->rst_rc_gpio,
+						    GPIOF_OUT_INIT_LOW, "rst-rc-pci");
+			if (ret == -EBUSY) {
+				dev_info(dev, "reset ep gpio using reset rc gpio\n");
+				pcie->rst_rc_gpio = -1;
+			} else if (ret) {
+				dev_err(dev, "unable to get reset rc GPIO %d\n", ret);
+				return ret;
+			}
+
+			if (!ret)
+				gpio_set_value(pcie->rst_rc_gpio, 0);
+		}
+	}
+
+	npcm_initialize_as_root_complex(pcie, bmc_npcm7xx);
 	npcm_pcie_rc_init_config_window(pcie);
 	
-	if (!ret) {
+	if (bmc_npcm7xx && (pcie->rst_rc_gpio > 0)) {
+		gpio_set_value(pcie->rst_rc_gpio, 1);
+		gpio_free(pcie->rst_rc_gpio);
+		msleep(15);
+	}
+
+	if (pcie->rst_ep_gpio > 0) {
 		gpio_set_value(pcie->rst_ep_gpio, 1);
 		gpio_free(pcie->rst_ep_gpio);
 	}
@@ -511,6 +556,10 @@ static int npcm_pcie_probe(struct platform_device *pdev)
 
 	pcie->dev = dev;
 
+	pcie->data = device_get_match_data(dev);
+	if (!pcie->data)
+		return -EINVAL;
+
 	pcie->reg_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pcie->reg_base))
 		return PTR_ERR(pcie->reg_base);
@@ -530,9 +579,9 @@ static int npcm_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(pcie->reset))
 		return PTR_ERR(pcie->reset);
 
-	pcie->gcr_regmap = syscon_regmap_lookup_by_compatible("nuvoton,npcm845-gcr");
+	pcie->gcr_regmap = syscon_regmap_lookup_by_phandle(dev->of_node, "nuvoton,sysgcr");
 	if (IS_ERR(pcie->gcr_regmap)) {
-		dev_err(&pdev->dev, "Failed to find nuvoton,npcm845-gcr\n");
+		dev_err(dev, "Failed to find gcr syscon\n");
 		return PTR_ERR(pcie->gcr_regmap);
 	}
 
@@ -573,9 +622,9 @@ static int npcm_pcie_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id npcm_pcie_ids[] = {
-	{
-		.compatible = "nuvoton,npcm845-pcie", },
-	{ }
+	{ .compatible = "nuvoton,npcm750-pcie", .data = &npxm7xx_pci_info },
+	{ .compatible = "nuvoton,npcm845-pcie", .data = &npxm8xx_pci_info },
+	{ },
 };
 
 static struct platform_driver npcm_pcie_driver = {
