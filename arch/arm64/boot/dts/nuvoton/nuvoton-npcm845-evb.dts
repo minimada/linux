@@ -286,6 +286,9 @@
 };
 
 &pcie {
+	/* used for e1000e PCI -> AXI window opening */
+	dma-ranges = <0x02000000 0 0x00000000 0x0 0x00000000 0 0x40000000>;
+	npcm-pci-ep-rst = <&gpio3 24 1>;
 	status = "okay";
 };
 
