@@ -489,37 +489,37 @@ static int npcm_pcie_init(struct device *dev, struct npcm_pcie *pcie)
 	if (of_device_is_compatible(np, "nuvoton,npcm750-pcie"))
 		bmc_npcm7xx = true;
 
+	if (bmc_npcm7xx) {
+		pcie->rst_rc_gpio = of_get_named_gpio(np, "npcm-pci-rc-rst", 0);
+		if (pcie->rst_rc_gpio < 0) {
+			dev_err(dev, "GPIO pci-rc-rst not found in device tree, NPCM PCIe failed %d\n", pcie->rst_rc_gpio);
+			return pcie->rst_rc_gpio;
+		} else {
+			ret = devm_gpio_request_one(dev, pcie->rst_rc_gpio,
+						    GPIOF_OUT_INIT_LOW, "rst-rc-pci");
+			if (ret) {
+				dev_err(dev, "unable to get reset rc GPIO %d\n", ret);
+				return ret;
+			}
+			gpio_set_value(pcie->rst_rc_gpio, 0);
+		}
+	}
+
 	pcie->rst_ep_gpio = of_get_named_gpio(np, "npcm-pci-ep-rst", 0);
 	if (pcie->rst_ep_gpio < 0) {
 		dev_warn(dev, "GPIO pci-ep-rst not found in device tree\n");
 	} else {
 		ret = devm_gpio_request_one(dev, pcie->rst_ep_gpio,
 					    GPIOF_OUT_INIT_LOW, "rst-ep-pci");
-		if (ret) {
+		if (ret == -EBUSY) {
+			dev_info(dev, "reset ep gpio using reset rc gpio\n");
+			pcie->rst_ep_gpio = -1;
+		} else if (ret) {
 			dev_err(dev, "unable to get reset ep GPIO %d\n", ret);
 			return ret;
 		}
-		gpio_set_value(pcie->rst_rc_gpio, 0);
-	}
-
-	if (bmc_npcm7xx) {
-		pcie->rst_rc_gpio = of_get_named_gpio(np, "npcm-pci-rc-rst", 0);
-		if (pcie->rst_rc_gpio < 0) {
-			dev_warn(dev, "GPIO pci-rc-rst not found in device tree\n");
-		} else {
-			ret = devm_gpio_request_one(dev, pcie->rst_rc_gpio,
-						    GPIOF_OUT_INIT_LOW, "rst-rc-pci");
-			if (ret == -EBUSY) {
-				dev_info(dev, "reset ep gpio using reset rc gpio\n");
-				pcie->rst_rc_gpio = -1;
-			} else if (ret) {
-				dev_err(dev, "unable to get reset rc GPIO %d\n", ret);
-				return ret;
-			}
-
-			if (!ret)
-				gpio_set_value(pcie->rst_rc_gpio, 0);
-		}
+		if (!ret)
+			gpio_set_value(pcie->rst_ep_gpio, 0);
 	}
 
 	npcm_initialize_as_root_complex(pcie, bmc_npcm7xx);
