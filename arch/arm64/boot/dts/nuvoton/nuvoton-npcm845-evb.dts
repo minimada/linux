@@ -112,6 +112,16 @@
 		};
 	};
 
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		tip_reserved: tip@0x0 {
+			reg = <0x0 0x0 0x0 0x6200000>;
+		};
+	};
+
 	tip_sram: sram@fffce000 {
 		compatible = "mmio-sram";
 		reg = <0 0xfffce000 0 0x1000>;
