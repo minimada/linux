@@ -291,6 +291,8 @@ struct svc_i3c_master {
 	dma_addr_t dma_rx_addr;
 	struct npcm_dma_xfer_desc dma_xfer;
 	u32 mint_save;
+
+	bool en_hj;
 };
 
 /**
@@ -387,9 +389,19 @@ to_svc_i3c_master(struct i3c_master_controller *master)
 static void svc_i3c_master_hj_work(struct work_struct *work)
 {
 	struct svc_i3c_master *master;
+	u32 mint;
 
 	master = container_of(work, struct svc_i3c_master, hj_work);
+
+	/* disable IBI/HJ interrupt during DAA */
+	mint = readl(master->regs + SVC_I3C_MINTSET);
+	if (mint & SVC_I3C_MINT_SLVSTART)
+		writel(SVC_I3C_MINT_SLVSTART, master->regs + SVC_I3C_MINTCLR);
+
 	i3c_master_do_daa(&master->base);
+
+	if (mint & SVC_I3C_MINT_SLVSTART)
+		writel(SVC_I3C_MINT_SLVSTART, master->regs + SVC_I3C_MINTSET);
 }
 
 static struct i3c_dev_desc *
@@ -513,13 +525,13 @@ static void svc_i3c_master_ibi_work(struct work_struct *work)
 		goto reenable_ibis;
 	}
 
-	/* Clear the interrupt status */
-	writel(SVC_I3C_MINT_IBIWON, master->regs + SVC_I3C_MSTATUS);
-
 	status = readl(master->regs + SVC_I3C_MSTATUS);
 	ibitype = SVC_I3C_MSTATUS_IBITYPE(status);
 	ibiaddr = SVC_I3C_MSTATUS_IBIADDR(status);
 
+	dev_dbg(master->dev, "ibitype=%d ibiaddr=%d\n", ibitype, ibiaddr);
+	dev_dbg(master->dev, "ibiwon: mctrl=0x%x mstatus=0x%x\n",
+		readl(master->regs + SVC_I3C_MCTRL), status);
 	/* Handle the critical responses to IBI's */
 	switch (ibitype) {
 	case SVC_I3C_MSTATUS_IBITYPE_IBI:
@@ -567,6 +579,10 @@ static void svc_i3c_master_ibi_work(struct work_struct *work)
 		svc_i3c_master_emit_stop(master);
 		break;
 	case SVC_I3C_MSTATUS_IBITYPE_HOT_JOIN:
+		readl_relaxed_poll_timeout(master->regs + SVC_I3C_MSTATUS, val,
+					   SVC_I3C_MSTATUS_MCTRLDONE(val), 0, 1000);
+		/* Emit stop to avoid the INVREQ error after DAA process */
+		svc_i3c_master_emit_stop(master);
 		queue_work(master->base.wq, &master->hj_work);
 		break;
 	case SVC_I3C_MSTATUS_IBITYPE_MASTER_REQUEST:
@@ -575,6 +591,8 @@ static void svc_i3c_master_ibi_work(struct work_struct *work)
 	}
 
 reenable_ibis:
+	/* clear IBIWON status */
+	writel(SVC_I3C_MINT_IBIWON, master->regs + SVC_I3C_MSTATUS);
 	/* Clear AUTOIBI in case it is not started yet */
 	writel(0, master->regs + SVC_I3C_MCTRL);
 	svc_i3c_master_enable_interrupts(master, SVC_I3C_MINT_SLVSTART);
@@ -2250,6 +2268,8 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 
 	svc_i3c_master_reset(master);
 
+	if (of_property_read_bool(dev->of_node, "enable-hj"))
+		master->en_hj = true;
 	svc_i3c_setup_dma(pdev, master);
 	svc_i3c_init_debugfs(pdev, master);
 
@@ -2262,6 +2282,10 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 	pm_runtime_mark_last_busy(&pdev->dev);
 	pm_runtime_put_autosuspend(&pdev->dev);
 
+	if (master->en_hj) {
+		dev_info(master->dev, "enable hot-join\n");
+		svc_i3c_master_enable_interrupts(master, SVC_I3C_MINT_SLVSTART);
+	}
 	return 0;
 
 rpm_disable:
