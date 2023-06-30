@@ -422,7 +422,13 @@ svc_i3c_master_dev_from_addr(struct svc_i3c_master *master,
 
 static void svc_i3c_master_emit_stop(struct svc_i3c_master *master)
 {
-	local_irq_disable();
+	u32 mint;
+
+	/* Temporarily disable slvstart interrupt to prevent spurious event */
+	mint = readl(master->regs + SVC_I3C_MINTSET);
+	if (mint & SVC_I3C_MINT_SLVSTART)
+		writel(SVC_I3C_MINT_SLVSTART, master->regs + SVC_I3C_MINTCLR);
+
 	writel(SVC_I3C_MCTRL_REQUEST_STOP, master->regs + SVC_I3C_MCTRL);
 
 	/*
@@ -438,7 +444,8 @@ static void svc_i3c_master_emit_stop(struct svc_i3c_master *master)
 	 * bad signals condition.
 	 */
 	writel(SVC_I3C_MINT_SLVSTART, master->regs + SVC_I3C_MSTATUS);
-	local_irq_enable();
+	if (mint & SVC_I3C_MINT_SLVSTART)
+		writel(SVC_I3C_MINT_SLVSTART, master->regs + SVC_I3C_MINTSET);
 }
 
 static int svc_i3c_master_handle_ibi(struct svc_i3c_master *master,
