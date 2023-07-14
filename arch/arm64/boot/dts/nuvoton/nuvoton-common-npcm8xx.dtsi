@@ -527,7 +527,7 @@
 				compatible = "silvaco,i3c-master";
 				reg = <0xfff10000 0x1000>,
 				      <0xf0850000 0x1000>,
-				      <0xf0800300 0x10>;
+				      <0xf0800300 0x4>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&i3c0_pins>;
 				clocks = <&clk NPCM8XX_CLK_AHB>, <&clk NPCM8XX_CLK_RCP>,
