@@ -28,9 +28,11 @@
 /* Slave Mode Registers */
 #define SVC_I3C_CONFIG      0x004
 #define   SVC_I3C_CONFIG_SLVEN BIT(0)
+#define   SVC_I3C_CONFIG_DDROK BIT(4)
 #define SVC_I3C_STATUS      0x008
 #define   SVC_I3C_STATUS_RXPEND(x) FIELD_GET(SVC_I3C_INT_RXPEND, (x))
 #define   SVC_I3C_STATUS_STREQWR(x) (x & BIT(4))
+#define   SVC_I3C_STATUS_DDRMATCH BIT(16)
 #define   SVC_I3C_STATUS_STOP BIT(10)
 #define SVC_I3C_CTRL        0x00C
 #define   SVC_I3C_CTRL_EVENT(x) FIELD_PREP(GENMASK(1, 0), (x))
@@ -85,9 +87,11 @@
 #define   SVC_I3C_MCTRL_REQUEST_STOP 2
 #define   SVC_I3C_MCTRL_REQUEST_IBI_ACKNACK 3
 #define   SVC_I3C_MCTRL_REQUEST_PROC_DAA 4
+#define   SVC_I3C_MCTRL_REQUEST_FORCE_EXIT 6
 #define   SVC_I3C_MCTRL_REQUEST_AUTO_IBI 7
 #define   SVC_I3C_MCTRL_TYPE_I3C 0
 #define   SVC_I3C_MCTRL_TYPE_I2C BIT(4)
+#define   SVC_I3C_MCTRL_TYPE_I3C_DDR BIT(5)
 #define   SVC_I3C_MCTRL_IBIRESP_AUTO 0
 #define   SVC_I3C_MCTRL_IBIRESP_ACK_WITHOUT_BYTE 0
 #define   SVC_I3C_MCTRL_IBIRESP_ACK_WITH_BYTE BIT(7)
@@ -137,6 +141,7 @@
 #define SVC_I3C_MINTMASKED   0x098
 #define SVC_I3C_MERRWARN     0x09C
 #define   SVC_I3C_MERRWARN_NACK(x) FIELD_GET(BIT(2), (x))
+#define   SVC_I3C_MERRWARN_HCRC(x) FIELD_GET(BIT(10), (x))
 #define SVC_I3C_MDMACTRL     0x0A0
 #define   SVC_I3C_MDMACTRL_DMAFB(x) FIELD_PREP(GENMASK(1, 0), (x))
 #define   SVC_I3C_MDMACTRL_DMATB(x) FIELD_PREP(GENMASK(3, 2), (x))
@@ -148,6 +153,7 @@
 #define   SVC_I3C_MDATACTRL_TXTRIG_FIFO_NOT_FULL GENMASK(5, 4)
 #define   SVC_I3C_MDATACTRL_RXTRIG_FIFO_NOT_EMPTY 0
 #define   SVC_I3C_MDATACTRL_RXCOUNT(x) FIELD_GET(GENMASK(28, 24), (x))
+#define   SVC_I3C_MDATACTRL_TXCOUNT(x) FIELD_GET(GENMASK(20, 16), (x))
 #define   SVC_I3C_MDATACTRL_TXFULL BIT(30)
 #define   SVC_I3C_MDATACTRL_RXEMPTY BIT(31)
 
@@ -171,6 +177,7 @@
 #define SVC_I3C_MAX_DEVS 32
 #define SVC_I3C_PM_TIMEOUT_MS 1000
 
+#define HDR_COMMAND	0x20
 /* This parameter depends on the implementation and may be tuned */
 #define SVC_I3C_FIFO_SIZE 16
 #define SVC_I3C_MAX_IBI_PAYLOAD_SIZE 8
@@ -293,6 +300,8 @@ struct svc_i3c_master {
 	u32 mint_save;
 
 	bool en_hj;
+	bool hdr_ddr;
+	bool hdr_mode;
 };
 
 /**
@@ -423,13 +432,19 @@ svc_i3c_master_dev_from_addr(struct svc_i3c_master *master,
 static void svc_i3c_master_emit_stop(struct svc_i3c_master *master)
 {
 	u32 mint;
+	u32 reg;
 
 	/* Temporarily disable slvstart interrupt to prevent spurious event */
 	mint = readl(master->regs + SVC_I3C_MINTSET);
 	if (mint & SVC_I3C_MINT_SLVSTART)
 		writel(SVC_I3C_MINT_SLVSTART, master->regs + SVC_I3C_MINTCLR);
 
-	writel(SVC_I3C_MCTRL_REQUEST_STOP, master->regs + SVC_I3C_MCTRL);
+	if (master->hdr_mode) {
+		writel(SVC_I3C_MCTRL_REQUEST_FORCE_EXIT, master->regs + SVC_I3C_MCTRL);
+		master->hdr_mode = false;
+	} else {
+		writel(SVC_I3C_MCTRL_REQUEST_STOP, master->regs + SVC_I3C_MCTRL);
+	}
 
 	/*
 	 * This delay is necessary after the emission of a stop, otherwise eg.
@@ -1268,8 +1283,19 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 			       bool use_dma)
 {
 	u32 reg, rdterm = *read_len;
-	int ret;
+	int ret, i, count, space;
 
+	if (rdterm > SVC_I3C_MAX_RDTERM)
+		rdterm = SVC_I3C_MAX_RDTERM;
+
+	if (xfer_type == SVC_I3C_MCTRL_TYPE_I3C_DDR) {
+		/* Write the HDR-DDR cmd to the MWDATAB register to send out to slave */
+		writel(HDR_COMMAND, master->regs + SVC_I3C_MWDATAB);
+		/* Read count: add 1 for HDR-DDR command word and 1 for CRC word */
+		if (rnw)
+			rdterm = 2 + rdterm / 2;
+		master->hdr_mode = true;
+	}
 	/*
 	 * There is a chance that first tx data bit is lost when it
 	 * is not ready in FIFO right after address phase.
@@ -1283,16 +1309,18 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 		if (ret)
 			return ret;
 
-		if (xfer_len == 1)
-			writel(out[0], master->regs + SVC_I3C_MWDATABE);
-		else
-			writel(out[0], master->regs + SVC_I3C_MWDATAB);
-		xfer_len--;
-		out++;
+		reg = readl(master->regs + SVC_I3C_MDATACTRL);
+		space = SVC_I3C_FIFO_SIZE - SVC_I3C_MDATACTRL_TXCOUNT(reg);
+		count = xfer_len > space ? space : xfer_len;
+		for (i = 0; i < count; i++) {
+			if (i == xfer_len - 1)
+				writel(out[0], master->regs + SVC_I3C_MWDATABE);
+			else
+				writel(out[0], master->regs + SVC_I3C_MWDATAB);
+			out++;
+		}
+		xfer_len -= count;
 	}
-
-	if (rdterm > SVC_I3C_MAX_RDTERM)
-		rdterm = SVC_I3C_MAX_RDTERM;
 
 	if (use_dma) {
 		if (xfer_len > MAX_DMA_COUNT) {
@@ -1350,6 +1378,15 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 		goto emit_stop;
 
 	writel(SVC_I3C_MINT_COMPLETE, master->regs + SVC_I3C_MSTATUS);
+
+	if (master->hdr_mode) {
+		reg = readl(master->regs + SVC_I3C_MERRWARN);
+		if (SVC_I3C_MERRWARN_HCRC(reg)) {
+			dev_err(master->dev, "HDR CRC error\n");
+			ret = -EIO;
+			goto emit_stop;
+		}
+	}
 
 	if (!continued) {
 		svc_i3c_master_emit_stop(master);
@@ -1610,7 +1647,10 @@ static int svc_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 	if (!xfer)
 		return -ENOMEM;
 
-	xfer->type = SVC_I3C_MCTRL_TYPE_I3C;
+	if (master->hdr_ddr && dev->info.hdr_cap & BIT(I3C_HDR_DDR))
+		xfer->type = SVC_I3C_MCTRL_TYPE_I3C_DDR;
+	else
+		xfer->type = SVC_I3C_MCTRL_TYPE_I3C;
 
 	for (i = 0; i < nxfers; i++) {
 		struct svc_i3c_cmd *cmd = &xfer->cmds[i];
@@ -1900,6 +1940,7 @@ static void svc_i3c_slave_check_complete(struct svc_i3c_master *master)
 	struct svc_i3c_cmd *cmd = &xfer->cmds[0];
 	int ch = cmd->rnw ? DMA_CH_RX : DMA_CH_TX;
 	u32 count, reg;
+	bool hdr_mode = false;
 
 	/* Get the DMA transfer count */
 	count = readl(master->dma_regs + NPCM_GDMA_CTCNT(ch));
@@ -1919,15 +1960,33 @@ static void svc_i3c_slave_check_complete(struct svc_i3c_master *master)
 	if (cmd->len < count)
 		goto quit;
 	count = cmd->len - count;
+
+	reg = readl(master->regs + SVC_I3C_STATUS);
+	if (reg & SVC_I3C_STATUS_DDRMATCH) {
+		writel(SVC_I3C_STATUS_DDRMATCH, master->regs);
+		hdr_mode = true;
+	}
 	if (cmd->rnw) {
 		struct i3c_dev_desc *desc = master->base.this;
 
-		memcpy(cmd->in, master->dma_rx_buf, count);
+		if (hdr_mode) {
+			/* Drop the hdr command */
+			dev_dbg(master->dev, "drop hdr cmd: 0x%x\n", master->dma_rx_buf[0]);
+			count--;
+			memcpy(cmd->in, master->dma_rx_buf + 1, count);
+		} else {
+			memcpy(cmd->in, master->dma_rx_buf, count);
+		}
 		dev_dbg(master->dev, "slave rx count %u\n", count);
 		if (desc->target_info.read_handler)
 			desc->target_info.read_handler(desc->dev, cmd->in, count);
 	} else {
 		cmd->len = count - SVC_I3C_DATACTRL_TXCOUNT(reg);
+		if (hdr_mode) {
+			reg = readl(master->regs + SVC_I3C_RDATAB);
+			dev_dbg(master->dev, "recv: hdr cmd=0x%x\n", reg);
+		}
+
 		/* Clear Pending Intr */
 		writel(0, master->regs + SVC_I3C_CTRL);
 		dev_dbg(master->dev, "slave tx count %u\n", cmd->len);
@@ -2064,6 +2123,8 @@ static int svc_i3c_slave_bus_init(struct i3c_master_controller *m)
 	/* Enable slave mode */
 	reg = readl(master->regs + SVC_I3C_CONFIG);
 	reg |= SVC_I3C_CONFIG_SLVEN;
+	if (master->hdr_ddr)
+		reg |= SVC_I3C_CONFIG_DDROK;
 	writel(reg, master->regs + SVC_I3C_CONFIG);
 
 	/* Prepare one RX transfer */
@@ -2275,6 +2336,10 @@ static int svc_i3c_master_probe(struct platform_device *pdev)
 
 	svc_i3c_master_reset(master);
 
+	if (of_property_read_bool(dev->of_node, "hdr-ddr")) {
+		dev_info(master->dev, "support hdr-ddr\n");
+		master->hdr_ddr = true;
+	}
 	if (of_property_read_bool(dev->of_node, "enable-hj"))
 		master->en_hj = true;
 	svc_i3c_setup_dma(pdev, master);
