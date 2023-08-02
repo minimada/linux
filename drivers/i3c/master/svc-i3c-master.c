@@ -432,7 +432,6 @@ svc_i3c_master_dev_from_addr(struct svc_i3c_master *master,
 static void svc_i3c_master_emit_stop(struct svc_i3c_master *master)
 {
 	u32 mint;
-	u32 reg;
 
 	/* Temporarily disable slvstart interrupt to prevent spurious event */
 	mint = readl(master->regs + SVC_I3C_MINTSET);
