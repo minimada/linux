@@ -1287,6 +1287,10 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 	if (rdterm > SVC_I3C_MAX_RDTERM)
 		rdterm = SVC_I3C_MAX_RDTERM;
 
+	/* Use SDR mode if transfer size is odd */
+	if (xfer_type == SVC_I3C_MCTRL_TYPE_I3C_DDR && (xfer_len % 2))
+		xfer_type = SVC_I3C_MCTRL_TYPE_I3C;
+
 	if (xfer_type == SVC_I3C_MCTRL_TYPE_I3C_DDR) {
 		/* Write the HDR-DDR cmd to the MWDATAB register to send out to slave */
 		writel(HDR_COMMAND, master->regs + SVC_I3C_MWDATAB);
