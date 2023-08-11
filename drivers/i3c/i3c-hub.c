@@ -525,8 +525,7 @@ static int i3c_hub_configure_hw(struct device *dev)
 }
 
 static const struct i3c_device_id i3c_hub_ids[] = {
-	I3C_DEVICE(0x3c0 >> 1, 0x70, NULL),
-	//I3C_CLASS(I3C_DCR_HUB, NULL),
+	I3C_CLASS(I3C_DCR_HUB, NULL),
 	{ },
 };
 
@@ -670,6 +669,10 @@ static int i3c_hub_probe(struct i3c_device *i3cdev)
 		goto error;
 	}
 
+	if (i3cdev->bus->jesd403) {
+		i3c_device_send_ccc_cmd(i3cdev, I3C_CCC_SETHID);
+		i3c_device_send_ccc_cmd(i3cdev, I3C_CCC_SETAASA);
+	}
 	/* TBD: Apply special/security lock here using DEV_CMD register */
 
 	return 0;
