@@ -1888,7 +1888,6 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
 	 * i3c_master_add_i3c_dev_locked().
 	 */
 	list_for_each_entry(i3cboardinfo, &master->boardinfo.i3c, node) {
-
 		if (!i3cboardinfo->init_dyn_addr && master->bus.jesd403) {
 			/* JESD403 devices only support setaasa */
 			ret = i3c_bus_get_addr_slot_status(&master->bus,
@@ -3210,6 +3209,33 @@ void i3c_dev_free_ibi_locked(struct i3c_dev_desc *dev)
 	kfree(dev->ibi);
 	dev->ibi = NULL;
 }
+
+int i3c_dev_send_ccc_cmd_locked(struct i3c_dev_desc *dev, u8 ccc_id)
+{
+	struct i3c_master_controller *master = i3c_dev_get_master(dev);
+	int ret;
+
+	switch (ccc_id) {
+	case I3C_CCC_SETAASA:
+		ret = i3c_master_setaasa_locked(master);
+		break;
+	case I3C_CCC_SETHID:
+		ret = i3c_master_sethid_locked(master);
+		break;
+	case I3C_CCC_RSTDAA(false):
+		ret = i3c_master_rstdaa_locked(master, dev->info.dyn_addr);
+		break;
+	case I3C_CCC_RSTDAA(true):
+		ret = i3c_master_rstdaa_locked(master, I3C_BROADCAST_ADDR);
+		break;
+	default:
+		dev_err(&master->dev, "Unpermitted ccc: %x\n", ccc_id);
+		return -ENOTSUPP;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(i3c_dev_send_ccc_cmd_locked);
 
 int i3c_for_each_dev(void *data, int (*fn)(struct device *, void *))
 {
