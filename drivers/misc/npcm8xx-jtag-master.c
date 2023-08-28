@@ -468,6 +468,9 @@ static int jtag_set_tapstate(struct npcm_jtm *jtag,
 	u8 count;
 	int ret;
 
+	if (from == JTAG_STATE_CURRENT)
+		from = jtag->tapstate;
+
 	if (from == to || to == JTAG_STATE_CURRENT)
 		return 0;
 
@@ -483,9 +486,6 @@ static int jtag_set_tapstate(struct npcm_jtm *jtag,
 		jtag->tapstate = jtagtlr;
 		return ret;
 	}
-
-	if (from == JTAG_STATE_CURRENT)
-		from = jtag->tapstate;
 
 	tms[0] = tmscyclelookup[from][to].tmsbits;
 	count   = tmscyclelookup[from][to].count;
@@ -542,7 +542,7 @@ static int jtag_transfer(struct npcm_jtm *jtag,
 	else if (xfer->type == JTAG_SDR_XFER)
 		jtag_set_tapstate(jtag, xfer->from, jtagshfdr);
 	else if (xfer->type == JTAG_RUNTEST_XFER)
-		jtag_set_tapstate(jtag, xfer->from, jtagrti);
+		jtag_set_tapstate(jtag, xfer->from, xfer->endstate);
 
 	/* SIR/SDR: the last bit should be shifted with TMS high */
 	if ((xfer->type == JTAG_SIR_XFER && xfer->endstate != jtagshfir) ||
@@ -565,8 +565,9 @@ static int jtag_transfer(struct npcm_jtm *jtag,
 	return ret;
 }
 
-/* Run in rti state for specific number of tcks */
-static int jtag_runtest(struct npcm_jtm *jtag, unsigned int tcks)
+/* Run in specified state for a specfied number of tcks */
+static int jtag_run_state(struct npcm_jtm *jtag, enum jtagstates run_state,
+			  unsigned int tcks)
 {
 	struct jtag_xfer xfer;
 	u32 bytes = DIV_ROUND_UP(tcks, BITS_PER_BYTE);
@@ -575,7 +576,7 @@ static int jtag_runtest(struct npcm_jtm *jtag, unsigned int tcks)
 	xfer.type = JTAG_RUNTEST_XFER;
 	xfer.direction = JTAG_WRITE_XFER;
 	xfer.from = JTAG_STATE_CURRENT;
-	xfer.endstate = jtagrti;
+	xfer.endstate = run_state;
 	xfer.length = tcks;
 
 	ret = jtag_transfer(jtag, &xfer, NULL, bytes);
@@ -654,6 +655,11 @@ static long jtag_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 						  jtagtlr);
 		jtag_set_tapstate(priv, tapstate.from,
 					  tapstate.endstate);
+		if (tapstate.tck && (tapstate.endstate == jtagtlr ||
+		    tapstate.endstate == jtagrti ||
+		    tapstate.endstate == jtagpaudr ||
+		    tapstate.endstate == jtagpauir))
+			jtag_run_state(priv, tapstate.endstate, tapstate.tck);
 		break;
 	case JTAG_GIOCSTATUS:
 		ret = put_user(priv->tapstate, (__u32 __user *)arg);
@@ -702,7 +708,7 @@ static long jtag_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case JTAG_SIOCMODE:
 		break;
 	case JTAG_RUNTEST:
-		ret = jtag_runtest(priv, (unsigned int)arg);
+		ret = jtag_run_state(priv, JTAG_STATE_CURRENT, (unsigned int)arg);
 		break;
 	default:
 		return -EINVAL;
