@@ -174,6 +174,10 @@
 #define   SVC_MDYNADDR_VALID BIT(0)
 #define   SVC_MDYNADDR_ADDR(x) FIELD_PREP(GENMASK(7, 1), (x))
 
+#define SVC_I3C_PARTNO       0x06C
+#define SVC_I3C_VENDORID     0x074
+#define   SVC_I3C_VENDORID_VID(x) FIELD_GET(GENMASK(14, 0), (x))
+
 #define SVC_I3C_MAX_DEVS 32
 #define SVC_I3C_PM_TIMEOUT_MS 1000
 
@@ -755,6 +759,8 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 		goto rpm_out;
 
 	info.dyn_addr = ret;
+	reg = readl(master->regs + SVC_I3C_VENDORID);
+	info.pid = (SVC_I3C_VENDORID_VID(reg) << 33 ) | readl(master->regs + SVC_I3C_PARTNO);
 
 	writel(SVC_MDYNADDR_VALID | SVC_MDYNADDR_ADDR(info.dyn_addr),
 	       master->regs + SVC_I3C_MDYNADDR);
