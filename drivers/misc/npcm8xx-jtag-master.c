@@ -96,7 +96,6 @@ enum jtag_reset {
 enum jtag_xfer_type {
 	JTAG_SIR_XFER = 0,
 	JTAG_SDR_XFER = 1,
-	JTAG_RUNTEST_XFER = 2,
 };
 
 enum jtag_xfer_direction {
@@ -465,10 +464,20 @@ static u32 npcm_jtm_set_baudrate(struct npcm_jtm *priv, unsigned int speed)
 	return (freq / ((ckdiv + 1) * 2));
 }
 
+static void jtag_reset_tapstate(struct npcm_jtm *jtag)
+{
+	u8 tms[2];
+
+	tms[0] = 0xff;
+	tms[1] = 0x01;
+	npcm_jtm_shift(jtag, NULL, NULL, tms, JTAG_TLR_TMS_COUNT);
+	jtag->tapstate = jtagtlr;
+}
+
 static int jtag_set_tapstate(struct npcm_jtm *jtag,
 				     enum jtagstates from, enum jtagstates to)
 {
-	u8 tdo[2], tdi[2], tms[2];
+	u8 tms[2];
 	u8 count;
 	int ret;
 
@@ -483,12 +492,8 @@ static int jtag_set_tapstate(struct npcm_jtm *jtag,
 
 	jtag->end_tms_high = false;
 	if (to == jtagtlr) {
-		tms[0] = 0xff;
-		tms[1] = 0x01;
-		tdo[0] = tdo[1] = 0;
-		ret = npcm_jtm_shift(jtag, tdo, tdi, tms, JTAG_TLR_TMS_COUNT);
-		jtag->tapstate = jtagtlr;
-		return ret;
+		jtag_reset_tapstate(jtag);
+		return 0;
 	}
 
 	tms[0] = tmscyclelookup[from][to].tmsbits;
@@ -497,8 +502,7 @@ static int jtag_set_tapstate(struct npcm_jtm *jtag,
 	if (count == 0)
 		return 0;
 
-	tdo[0] = 0;
-	ret = npcm_jtm_shift(jtag, tdo, tdi, tms, count);
+	ret = npcm_jtm_shift(jtag, NULL, NULL, tms, count);
 	pr_debug("jtag: change state %d -> %d\n", from, to);
 	jtag->tapstate = to;
 
@@ -535,18 +539,14 @@ static int jtag_transfer(struct npcm_jtm *jtag,
 	if (xfer->length == 0)
 		return 0;
 
-	if (xfer->type != JTAG_RUNTEST_XFER) {
-		jtm_tdi = kzalloc(bytes, GFP_KERNEL);
-		if (!jtm_tdi)
-			return -ENOMEM;
-	}
+	jtm_tdi = kzalloc(bytes, GFP_KERNEL);
+	if (!jtm_tdi)
+		return -ENOMEM;
 
 	if (xfer->type == JTAG_SIR_XFER)
 		jtag_set_tapstate(jtag, xfer->from, jtagshfir);
 	else if (xfer->type == JTAG_SDR_XFER)
 		jtag_set_tapstate(jtag, xfer->from, jtagshfdr);
-	else if (xfer->type == JTAG_RUNTEST_XFER)
-		jtag_set_tapstate(jtag, xfer->from, xfer->endstate);
 
 	/* SIR/SDR: the last bit should be shifted with TMS high */
 	if ((xfer->type == JTAG_SIR_XFER && xfer->endstate != jtagshfir) ||
@@ -560,11 +560,9 @@ static int jtag_transfer(struct npcm_jtm *jtag,
 	ret = npcm_jtm_shift(jtag, jtm_tdo, jtm_tdi, NULL, xfer->length);
 	jtag_set_tapstate(jtag, JTAG_STATE_CURRENT, xfer->endstate);
 
-	if (xfer->type != JTAG_RUNTEST_XFER) {
-		if (jtm_tdo && !ret)
-			memcpy(jtm_tdo, jtm_tdi, bytes);
-		kfree(jtm_tdi);
-	}
+	if (jtm_tdo && !ret)
+		memcpy(jtm_tdo, jtm_tdi, bytes);
+	kfree(jtm_tdi);
 
 	return ret;
 }
@@ -573,17 +571,11 @@ static int jtag_transfer(struct npcm_jtm *jtag,
 static int jtag_run_state(struct npcm_jtm *jtag, enum jtagstates run_state,
 			  unsigned int tcks)
 {
-	struct jtag_xfer xfer;
-	u32 bytes = DIV_ROUND_UP(tcks, BITS_PER_BYTE);
 	int ret;
 
-	xfer.type = JTAG_RUNTEST_XFER;
-	xfer.direction = JTAG_WRITE_XFER;
-	xfer.from = JTAG_STATE_CURRENT;
-	xfer.endstate = run_state;
-	xfer.length = tcks;
-
-	ret = jtag_transfer(jtag, &xfer, NULL, bytes);
+	jtag_set_tapstate(jtag, JTAG_STATE_CURRENT, run_state);
+	jtag->end_tms_high = false;
+	ret = npcm_jtm_shift(jtag, NULL, NULL, NULL, tcks);
 
 	return ret;
 }
@@ -654,10 +646,11 @@ static long jtag_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (tapstate.reset > JTAG_FORCE_RESET)
 			return -EINVAL;
 		if (tapstate.reset == JTAG_FORCE_RESET)
-			jtag_set_tapstate(priv, JTAG_STATE_CURRENT,
-						  jtagtlr);
+			jtag_reset_tapstate(priv);
 		jtag_set_tapstate(priv, tapstate.from,
 					  tapstate.endstate);
+		if (tapstate.endstate == JTAG_STATE_CURRENT)
+			tapstate.endstate = priv->tapstate;
 		if (tapstate.tck && (tapstate.endstate == jtagtlr ||
 		    tapstate.endstate == jtagrti ||
 		    tapstate.endstate == jtagpaudr ||
@@ -736,7 +729,7 @@ static int jtag_open(struct inode *inode, struct file *file)
 	file->private_data = jtag;
 	spin_unlock(&jtag_file_lock);
 
-	jtag_set_tapstate(jtag, JTAG_STATE_CURRENT, jtagtlr);
+	jtag_reset_tapstate(jtag);
 
 	return 0;
 }
