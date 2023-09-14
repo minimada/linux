@@ -1938,9 +1938,6 @@ static int ci_udc_start(struct usb_gadget *gadget,
 	if (retval)
 		return retval;
 
-/* the chipidea have a to wait to detect the vbus active, in NPCM case the vbus didnt activated by the HW */
-	ci->vbus_active = true;
-
 	ci->driver = driver;
 
 	/* Start otg fsm for B-device */

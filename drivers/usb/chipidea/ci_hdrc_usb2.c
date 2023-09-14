@@ -15,15 +15,8 @@
 #include <linux/usb/chipidea.h>
 #include <linux/usb/hcd.h>
 #include <linux/usb/ulpi.h>
-#include <linux/regmap.h>
-#include <linux/mfd/syscon.h>
 
 #include "ci.h"
-
-#define INTCR3_OFFSET			0x9C
-
-#define NPCM_INTCR3_USBPHYSW		GENMASK(13, 12)
-#define NPCM845_INTCR3_USBPHYSW		GENMASK(15, 14)
 
 struct ci_hdrc_usb2_priv {
 	struct platform_device	*ci_pdev;
@@ -47,8 +40,6 @@ static const struct ci_hdrc_platform_data ci_zevio_pdata = {
 
 static const struct of_device_id ci_hdrc_usb2_of_match[] = {
 	{ .compatible = "chipidea,usb2" },
-	{ .compatible = "nuvoton,npcm845-udc" },
-	{ .compatible = "nuvoton,npcm750-udc" },
 	{ .compatible = "xlnx,zynq-usb-2.20a", .data = &ci_zynq_pdata },
 	{ .compatible = "lsi,zevio-usb", .data = &ci_zevio_pdata },
 	{ }
@@ -62,9 +53,6 @@ static int ci_hdrc_usb2_probe(struct platform_device *pdev)
 	struct ci_hdrc_platform_data *ci_pdata = dev_get_platdata(dev);
 	int ret;
 	const struct of_device_id *match;
-	static struct regmap *gcr_regmap;
-	int udc_id;
-	struct device_node *np = pdev->dev.of_node;
 
 	if (!ci_pdata) {
 		ci_pdata = devm_kmalloc(dev, sizeof(*ci_pdata), GFP_KERNEL);
@@ -94,34 +82,6 @@ static int ci_hdrc_usb2_probe(struct platform_device *pdev)
 	}
 
 	ci_pdata->name = dev_name(dev);
-
-	udc_id = of_alias_get_id(np, "udc");
-	if (udc_id == 9) {
-		if (of_device_is_compatible(np, "nuvoton,npcm750-udc")) {
-			gcr_regmap = syscon_regmap_lookup_by_compatible("nuvoton,npcm750-gcr");
-			if (IS_ERR(gcr_regmap)) {
-				pr_err("%s: failed to find nuvoton,npcm750-gcr\n", __func__);
-				return IS_ERR(gcr_regmap);
-			}
-		} else {
-			gcr_regmap = syscon_regmap_lookup_by_compatible("nuvoton,npcm845-gcr");
-			if (IS_ERR(gcr_regmap)) {
-				pr_err("%s: failed to find nuvoton,npcm845-gcr\n", __func__);
-				return IS_ERR(gcr_regmap);
-			}
-		}
-		regmap_update_bits(gcr_regmap, INTCR3_OFFSET, NPCM_INTCR3_USBPHYSW, NPCM_INTCR3_USBPHYSW);
-	}
-	if (udc_id == 8 && of_device_is_compatible(np, "nuvoton,npcm845-udc")) {
-		gcr_regmap = syscon_regmap_lookup_by_compatible("nuvoton,npcm845-gcr");
-		if (IS_ERR(gcr_regmap)) {
-			pr_err("%s: failed to find nuvoton,npcm845-gcr\n", __func__);
-			return IS_ERR(gcr_regmap);
-		}
-
-		regmap_update_bits(gcr_regmap, INTCR3_OFFSET,
-				   NPCM845_INTCR3_USBPHYSW, NPCM845_INTCR3_USBPHYSW);
-	}
 
 	priv->ci_pdev = ci_hdrc_add_device(dev, pdev->resource,
 					   pdev->num_resources, ci_pdata);

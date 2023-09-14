@@ -497,10 +497,7 @@ int hw_device_reset(struct ci_hdrc *ci)
 		if (ret)
 			return ret;
 	}
-	
-	/* clear all mode bits */
-	hw_write(ci, OP_USBMODE, 0xffffffff, 0);
-	
+
 	/* USBMODE should be configured step by step */
 	hw_write(ci, OP_USBMODE, USBMODE_CM, USBMODE_CM_IDLE);
 	hw_write(ci, OP_USBMODE, USBMODE_CM, USBMODE_CM_DC);
