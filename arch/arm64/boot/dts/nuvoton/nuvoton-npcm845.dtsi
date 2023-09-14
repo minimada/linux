@@ -283,6 +283,7 @@
 			interrupts = <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk NPCM8XX_CLK_SU>;
 			clock-names = "clk_usb_bridge";
+			nuvoton,sysgcr = <&gcr>;
 			phys = <&udc0_phy>;
 			phy_type = "utmi_wide";
 			dr_mode = "peripheral";
@@ -296,6 +297,7 @@
 			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk NPCM8XX_CLK_SU>;
 			clock-names = "clk_usb_bridge";
+			nuvoton,sysgcr = <&gcr>;
 			phys = <&udc0_phy>;
 			phy_type = "utmi_wide";
 			dr_mode = "peripheral";
