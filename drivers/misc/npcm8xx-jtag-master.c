@@ -40,6 +40,7 @@
 #define NPCM_JTM_TIMEOUT_MS		10000
 #define JTAG_MAX_XFER_DATA_LEN	65535
 #define JTAG_TLR_TMS_COUNT		9
+#define TRST_ASSERT	1
 
 struct tck_bitbang {
 	__u8     tms;
@@ -112,7 +113,7 @@ enum jtag_xfer_direction {
 #define JTAG_GIOCSTATUS _IOWR(__JTAG_IOCTL_MAGIC, 4, enum jtagstates)
 #define JTAG_SIOCMODE	_IOW(__JTAG_IOCTL_MAGIC, 5, unsigned int)
 #define JTAG_IOCBITBANG	_IOW(__JTAG_IOCTL_MAGIC, 6, unsigned int)
-#define JTAG_RUNTEST    _IOW(__JTAG_IOCTL_MAGIC, 7, unsigned int)
+#define JTAG_SIOCTRST	_IOW(__JTAG_IOCTL_MAGIC, 7, unsigned int)
 
 static DEFINE_IDA(jtag_ida);
 static DEFINE_SPINLOCK(jtag_file_lock);
@@ -590,6 +591,7 @@ static long jtag_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	u8 *xfer_data;
 	u32 data_size;
 	u32 value;
+	u32 active;
 	int ret = 0;
 
 	switch (cmd) {
@@ -703,8 +705,15 @@ static long jtag_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 	case JTAG_SIOCMODE:
 		break;
-	case JTAG_RUNTEST:
-		ret = jtag_run_state(priv, JTAG_STATE_CURRENT, (unsigned int)arg);
+	case JTAG_SIOCTRST:
+		if (get_user(active, (__u32 __user *)arg))
+			return -EFAULT;
+		value = readl(priv->base + JTM_CTL);
+		if (active == TRST_ASSERT)
+			value &= ~JTM_CTL_TRST;
+		else
+			value |= JTM_CTL_TRST;
+		writel(value, priv->base + JTM_CTL);
 		break;
 	default:
 		return -EINVAL;
@@ -728,8 +737,6 @@ static int jtag_open(struct inode *inode, struct file *file)
 	jtag->is_open = true;
 	file->private_data = jtag;
 	spin_unlock(&jtag_file_lock);
-
-	jtag_reset_tapstate(jtag);
 
 	return 0;
 }
