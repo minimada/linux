@@ -982,6 +982,10 @@ static int svc_i3c_master_do_daa_locked(struct svc_i3c_master *master,
 				 */
 				break;
 			} else if (SVC_I3C_MSTATUS_NACKED(reg)) {
+				/* No I3C devices attached */
+				if (dev_nb == 0)
+					break;
+
 				/*
 				 * A slave device nacked the address, this is
 				 * allowed only once, DAA will be stopped and
@@ -1438,10 +1442,6 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 	return 0;
 
 emit_stop:
-	reg = readl(master->regs + SVC_I3C_MERRWARN);
-	if (SVC_I3C_MERRWARN_NACK(reg))
-		ret = I3C_ERROR_M2;
-
 	if (use_dma)
 		svc_i3c_master_stop_dma(master);
 	else
@@ -1663,9 +1663,11 @@ static int svc_i3c_master_send_ccc_cmd(struct i3c_master_controller *m,
 	else
 		ret = svc_i3c_master_send_direct_ccc_cmd(master, cmd);
 
-	if (ret)
+	if (ret) {
 		dev_dbg(master->dev, "send ccc 0x%02x %s, ret = %d\n",
 				cmd->id, broadcast ? "(broadcast)" : "", ret);
+		cmd->err = I3C_ERROR_M2;
+	}
 
 	return ret;
 }
