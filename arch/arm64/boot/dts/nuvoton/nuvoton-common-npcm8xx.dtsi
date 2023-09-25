@@ -51,6 +51,12 @@
 				};
 			};
 		};
+
+		spswc: spswc@f0800038 {
+			compatible = "nuvoton,npcm-sp-ctrl";
+			reg = <0x0 0xf0800038 0x0 0x4>;
+		};
+
 	};
 
 	ahb {

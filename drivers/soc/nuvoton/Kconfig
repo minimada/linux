@@ -14,6 +14,13 @@ config NPCM_MBOX_CERBERUS
 	  processors on the BMC such as TIP and CP. 
 	  Select Y here if you want to use NPCM mailbox controller.
 
+config NPCM_SERIAL_PORT_CONTROL
+	tristate "NPCM Serial Port Mode Control"
+	depends on ARCH_NPCM || COMPILE_TEST
+	help
+	  Provides a driver to control the serial port switch that
+	  enables the SoC to snoop and take over the serial interface.
+	  Allow users to change the serial port mode via sysfs interface.
 endmenu
 
 endif
