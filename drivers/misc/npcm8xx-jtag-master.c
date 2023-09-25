@@ -112,6 +112,7 @@ enum jtag_xfer_direction {
 #define JTAG_GIOCSTATUS _IOWR(__JTAG_IOCTL_MAGIC, 4, enum jtagstates)
 #define JTAG_SIOCMODE	_IOW(__JTAG_IOCTL_MAGIC, 5, unsigned int)
 #define JTAG_IOCBITBANG	_IOW(__JTAG_IOCTL_MAGIC, 6, unsigned int)
+#define JTAG_RUNTEST    _IOW(__JTAG_IOCTL_MAGIC, 7, unsigned int)
 
 static DEFINE_IDA(jtag_ida);
 static DEFINE_SPINLOCK(jtag_file_lock);
@@ -701,6 +702,9 @@ static long jtag_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		break;
 	case JTAG_SIOCMODE:
+		break;
+	case JTAG_RUNTEST:
+		ret = jtag_run_state(priv, JTAG_STATE_CURRENT, (unsigned int)arg);
 		break;
 	default:
 		return -EINVAL;
