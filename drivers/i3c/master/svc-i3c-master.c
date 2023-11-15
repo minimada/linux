@@ -983,8 +983,10 @@ static int svc_i3c_master_do_daa_locked(struct svc_i3c_master *master,
 				break;
 			} else if (SVC_I3C_MSTATUS_NACKED(reg)) {
 				/* No I3C devices attached */
-				if (dev_nb == 0)
+				if (dev_nb == 0) {
+					svc_i3c_master_emit_stop(master);
 					break;
+				}
 
 				/*
 				 * A slave device nacked the address, this is
