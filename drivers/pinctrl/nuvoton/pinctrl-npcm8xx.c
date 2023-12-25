@@ -2054,7 +2054,7 @@ static int npcm8xx_gpio_request_enable(struct pinctrl_dev *pctldev,
 	const unsigned int *pin = &offset;
 	int mode = fn_gpio;
 
-	if ((pin[0] >= 183) && (pin[0] <= 189))
+	if (((pin[0] >= 183) && (pin[0] <= 189)) || (pin[0] == 35) || (pin[0] == 36))
 		mode = pincfg[pin[0]].fn0;
 
 	npcm8xx_setfunc(npcm->gcr_regmap, &offset, 1, mode);
