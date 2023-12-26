@@ -200,7 +200,8 @@
 #define  VCD_HOR_LIN_LAST_VALUE		GENMASK(11, 0)
 
 #define VCD_FIFO			0x805c
-#define  VCD_FIFO_TH			0x100350ff
+#define  VCD_FIFO_TH_HEAD1		0x35043
+#define  VCD_FIFO_TH_HEAD2		0x100350ff
 
 /* GCR Registers */
 #define INTCR				0x3c
@@ -1055,7 +1056,10 @@ static int npcm750_vcd_init(struct npcm750_vcd *priv)
 	}
 
 	/* Set the FIFO thresholds */
-	regmap_write(vcd, VCD_FIFO, VCD_FIFO_TH);
+	if (priv->use_head1_source)
+		regmap_write(vcd, VCD_FIFO, VCD_FIFO_TH_HEAD1);
+	else
+		regmap_write(vcd, VCD_FIFO, VCD_FIFO_TH_HEAD2);
 
 	/* Set VCD frame physical address */
 	regmap_write(vcd, VCD_FBA_ADR, priv->dma);
