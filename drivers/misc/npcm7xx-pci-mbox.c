@@ -25,6 +25,8 @@
 #define NPCM7XX_MBOX_ALL_CIE	GENMASK(7, 0)
 #define NPCM7XX_MBOX_ALL_HIF	GENMASK(7, 0)
 
+static DEFINE_IDA(mbox_ida);
+
 struct npcm7xx_mbox {
 	struct miscdevice	miscdev;
 	struct regmap		*regmap;
@@ -210,6 +212,7 @@ static int npcm7xx_mbox_probe(struct platform_device *pdev)
 	struct device *dev;
 	struct resource *res;
 	int rc;
+	int id;
 
 	dev = &pdev->dev;
 
@@ -234,8 +237,12 @@ static int npcm7xx_mbox_probe(struct platform_device *pdev)
 	spin_lock_init(&mbox->lock);
 	init_waitqueue_head(&mbox->queue);
 
+	id = ida_simple_get(&mbox_ida, 0, 0, GFP_KERNEL);
+	if (id < 0)
+		return id;
+
 	mbox->miscdev.minor = MISC_DYNAMIC_MINOR;
-	mbox->miscdev.name = DEVICE_NAME;
+	mbox->miscdev.name = kasprintf(GFP_KERNEL, "%s%d", DEVICE_NAME, id);
 	mbox->miscdev.fops = &npcm7xx_mbox_fops;
 	mbox->miscdev.parent = dev;
 	mbox->cif0 = false;
@@ -252,7 +259,7 @@ static int npcm7xx_mbox_probe(struct platform_device *pdev)
 		return rc;
 	}
 
-	pr_info("NPCM7xx PCI Mailbox probed\n");
+	pr_info("NPCM7xx PCI Mailbox %d probed\n", id);
 
 	return 0;
 }
