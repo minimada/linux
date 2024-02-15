@@ -1089,6 +1089,7 @@ static int svc_i3c_master_do_daa_locked(struct svc_i3c_master *master,
 {
 	u64 prov_id[SVC_I3C_MAX_DEVS] = {}, nacking_prov_id = 0;
 	unsigned int dev_nb = 0, last_addr = 0;
+	unsigned long start = jiffies;
 	u32 reg;
 	int ret, i;
 	int dyn_addr;
@@ -1115,6 +1116,11 @@ static int svc_i3c_master_do_daa_locked(struct svc_i3c_master *master,
 		if (ret)
 			return ret;
 
+		if (time_after(jiffies, start + msecs_to_jiffies(3000))) {
+			svc_i3c_master_emit_stop(master);
+			dev_info(master->dev, "do_daa expired\n");
+			break;
+		}
 		/* runtime do_daa may ibiwon by others slave devices */
 		if (SVC_I3C_MSTATUS_IBIWON(reg)) {
 			ret = svc_i3c_master_handle_ibiwon(master, false);
@@ -1125,6 +1131,11 @@ static int svc_i3c_master_do_daa_locked(struct svc_i3c_master *master,
 				continue;
 		}
 
+		if (dev_nb == SVC_I3C_MAX_DEVS) {
+			svc_i3c_master_emit_stop(master);
+			dev_info(master->dev, "Reach max devs\n");
+			break;
+		}
 		if (SVC_I3C_MSTATUS_RXPEND(reg)) {
 			u8 data[6];
 
@@ -1499,6 +1510,7 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 	u32 reg, rdterm = *read_len, mstatus, mint;
 	int ret, i, count, space;
 	unsigned long flags;
+	unsigned long start;
 
 	if (rdterm > SVC_I3C_MAX_RDTERM)
 		rdterm = SVC_I3C_MAX_RDTERM;
@@ -1559,6 +1571,7 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 	if (!use_dma)
 		local_irq_disable();
 
+	start = jiffies;
 retry_start:
 	writel(SVC_I3C_MCTRL_REQUEST_START_ADDR |
 	       xfer_type |
@@ -1614,6 +1627,10 @@ retry_start:
 		}
 
 		svc_i3c_master_clear_merrwarn(master);
+		if (time_after(jiffies, start + msecs_to_jiffies(1000))) {
+			dev_info(master->dev, "abnormal ibiwon events\n");
+			goto emit_stop;
+		}
 		goto retry_start;
 	}
 
