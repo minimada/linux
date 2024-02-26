@@ -197,7 +197,7 @@ config SSIF_IPMI_BMC
 	  interface (SSIF).
 
 config NPCM7XX_SSIF_IPMI_BMC
-        depends on ARCH_NPCM7XX || COMPILE_TEST
+        depends on ARCH_NPCM || COMPILE_TEST
         select SSIF_IPMI_BMC
         select I2C_SLAVE
         tristate "Nuvonton SSIF IPMI BMC driver"
