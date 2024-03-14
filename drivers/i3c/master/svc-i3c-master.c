@@ -241,6 +241,7 @@ struct npcm_dma_xfer_desc {
 	u8 *in;
 	u32 len;
 	bool rnw;
+	bool end;
 };
 /**
  * struct svc_i3c_master - Silvaco I3C Master structure
@@ -677,6 +678,9 @@ static irqreturn_t svc_i3c_master_irq_handler(int irq, void *dev_id)
 	unsigned long flags;
 
 	if (SVC_I3C_MSTATUS_COMPLETE(active)) {
+		if (master->dma_xfer.end)
+			svc_i3c_master_emit_stop(master);
+		writel(SVC_I3C_MINT_COMPLETE, master->regs + SVC_I3C_MSTATUS);
 		/* Disable COMPLETE interrupt */
 		spin_lock_irqsave(&master->lock_irq, flags);
 		writel(SVC_I3C_MINT_COMPLETE, master->regs + SVC_I3C_MINTCLR);
@@ -1563,6 +1567,7 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 		master->dma_xfer.in = in;
 		master->dma_xfer.len = xfer_len;
 		master->dma_xfer.rnw = rnw;
+		master->dma_xfer.end = !continued;
 		init_completion(&master->xfer_comp);
 		svc_i3c_master_start_dma(master);
 	}
@@ -1653,10 +1658,12 @@ retry_start:
 	if (rnw)
 		*read_len = ret;
 
-	ret = readl_poll_timeout(master->regs + SVC_I3C_MSTATUS, reg,
-				 SVC_I3C_MSTATUS_COMPLETE(reg), 0, 1000);
-	if (ret)
-		goto emit_stop;
+	if (!use_dma) {
+		ret = readl_poll_timeout(master->regs + SVC_I3C_MSTATUS, reg,
+					 SVC_I3C_MSTATUS_COMPLETE(reg), 0, 1000);
+		if (ret)
+			goto emit_stop;
+	}
 
 	writel(SVC_I3C_MINT_COMPLETE, master->regs + SVC_I3C_MSTATUS);
 
@@ -1669,7 +1676,7 @@ retry_start:
 		}
 	}
 
-	if (!continued)
+	if (!continued && !use_dma)
 		svc_i3c_master_emit_stop(master);
 
 	if (!use_dma)
