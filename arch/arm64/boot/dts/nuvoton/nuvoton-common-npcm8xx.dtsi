@@ -90,7 +90,7 @@
 			#interrupt-cells = <1>;
 			ranges = <0x01000000 0 0xe9000000 0x0 0xe9000000 0 0x01000000
 				0x02000000 0 0xea000000 0x0 0xea000000 0 0x04000000>;
-			resets = <&rstc 0x34 0x15>;
+			resets = <&rstc 0x34 15>;
 			interrupts = <GIC_SPI 127 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-map-mask = <0 0 0 7>;
 			interrupt-map = <0 0 0 1 &gic GIC_SPI 127 IRQ_TYPE_LEVEL_HIGH>;
