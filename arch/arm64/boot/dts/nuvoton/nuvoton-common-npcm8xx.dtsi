@@ -112,14 +112,14 @@
 		};
 
 		ohci1: usb@f0829000 {
-			compatible = "nuvoton,npcm750-ohci";
+			compatible = "nuvoton,npcm750-ohci", "generic-ohci";
 			reg = <0x0 0xf0829000 0x0 0x1000>;
 			interrupts = <GIC_SPI 62 IRQ_TYPE_LEVEL_HIGH>;
 			status = "disabled";
 		};
 
 		ohci2: usb@f082b000 {
-			compatible = "nuvoton,npcm750-ohci";
+			compatible = "nuvoton,npcm750-ohci", "generic-ohci";
 			reg = <0x0 0xf082b000 0x0 0x1000>;
 			interrupts = <GIC_SPI 64 IRQ_TYPE_LEVEL_HIGH>;
 			status = "disabled";
