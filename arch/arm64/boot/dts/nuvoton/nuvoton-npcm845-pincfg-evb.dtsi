@@ -77,7 +77,7 @@
 			slew-rate = <1>;
 		};
 		pin7_slew: pin7_slew {
-			pins = "GPIO7/IOX2_D0/SMB2D_SCL";
+			pins = "GPIO7/IOX2_DO/SMB2D_SCL";
 			slew-rate = <1>;
 		};
 	};
