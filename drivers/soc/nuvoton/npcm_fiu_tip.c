@@ -325,7 +325,7 @@ static int npcm_fiu_tip_probe(struct platform_device *pdev)
 	head->chan = mbox_request_channel_byname(&head->cl, "fiu_tip");
 	if (IS_ERR(head->chan)) {
 		dev_err(dev, "mbox channel request failed\n");
-		ret = PTR_ERR(head->chan);
+		return PTR_ERR(head->chan);
 	}
 
 	platform_set_drvdata(pdev, head);
