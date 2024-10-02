@@ -2093,6 +2093,7 @@ static const struct pinmux_ops npcm8xx_pinmux_ops = {
 	.gpio_request_enable = npcm8xx_gpio_request_enable,
 	.gpio_disable_free = npcm8xx_gpio_request_free,
 	.gpio_set_direction = npcm_gpio_set_direction,
+	.strict = true,
 };
 
 static int debounce_timing_setting(struct npcm8xx_gpio *bank, u32 gpio,
