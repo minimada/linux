@@ -1932,6 +1932,7 @@ static int npcm_i2c_init_clk(struct npcm_i2c *bus, u32 bus_freq_hz)
 	struct  SMB_TIMING_T *smb_timing;
 	u8   scl_table_cnt = 0, table_size = 0;
 
+	u8   scl_ht, scl_lt;
 	u8   fast_mode = 0;
 	u32  src_clk_khz;
 	u32  bus_freq_khz;
@@ -1981,8 +1982,13 @@ static int npcm_i2c_init_clk(struct npcm_i2c *bus, u32 bus_freq_hz)
 		 * k1 = 2 * SCLLT7-0 -> Low Time  = k1 / 2
 		 * k2 = 2 * SCLLT7-0 -> High Time = k2 / 2
 		 */
-		iowrite8(smb_timing[scl_table_cnt].scllt, bus->reg + NPCM_I2CSCLLT);
-		iowrite8(smb_timing[scl_table_cnt].sclht, bus->reg + NPCM_I2CSCLHT);
+		if (of_property_read_u8(bus->dev->of_node, "npcm,i2cscllt", &scl_lt))
+			scl_lt = smb_timing[scl_table_cnt].scllt;
+		if (of_property_read_u8(bus->dev->of_node, "npcm,i2csclht", &scl_ht))
+			scl_ht = smb_timing[scl_table_cnt].sclht;
+		iowrite8(scl_lt, bus->reg + NPCM_I2CSCLLT);
+		iowrite8(scl_ht, bus->reg + NPCM_I2CSCLHT);
+		dev_info(bus->dev, "set SCLLT:%02X, SCLHT:%02X\n", scl_lt, scl_ht);
 
 		iowrite8(smb_timing[scl_table_cnt].dbcnt, bus->reg + NPCM_I2CCTL5);
 	}
