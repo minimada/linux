@@ -8,9 +8,9 @@
  * Author: Tomer Maimon <tomer.maimon@nuvoton.com>
  */
 
-
 #define pr_fmt(fmt) "npcm8xx_clk: " fmt
 
+#include <linux/auxiliary_bus.h>
 #include <linux/bitfield.h>
 #include <linux/clk-provider.h>
 #include <linux/err.h>
@@ -427,4 +427,3 @@ module_auxiliary_driver(npcm8xx_clock_driver);
 MODULE_DESCRIPTION("Clock driver for Nuvoton NPCM8XX BMC SoC");
 MODULE_AUTHOR("Tomer Maimon <tomer.maimon@nuvoton.com>");
 MODULE_LICENSE("GPL v2");
-

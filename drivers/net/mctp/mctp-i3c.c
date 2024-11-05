@@ -13,6 +13,7 @@
 #include <linux/i3c/device.h>
 #include <linux/i3c/master.h>
 #include <linux/if_arp.h>
+#include <asm/unaligned.h>
 #include <net/mctp.h>
 #include <net/mctpdevice.h>
 
@@ -34,9 +35,9 @@ static const int MCTP_I3C_TX_QUEUE_LEN = 1100;
 static const int MCTP_I3C_IBI_SLOTS = 8;
 
 /* Mandatory Data Byte in an IBI, from DSP0233 */
-static const u8 I3C_MDB_MCTP = 0xAE;
+#define I3C_MDB_MCTP 0xAE
 /* From MIPI Device Characteristics Register (DCR) Assignments */
-static const u8 I3C_DCR_MCTP = 0xCC;
+#define I3C_DCR_MCTP 0xCC
 
 static const char *MCTP_I3C_OF_PROP = "mctp-controller";
 
@@ -96,21 +97,6 @@ struct mctp_i3c_internal_hdr {
 	u8 source[PID_SIZE];
 } __packed;
 
-/* Returns the 48 bit Provisioned Id from an i3c_device_info.pid */
-static void pid_to_addr(u64 pid, u8 addr[PID_SIZE])
-{
-	pid = cpu_to_be64(pid);
-	memcpy(addr, ((u8 *)&pid) + 2, PID_SIZE);
-}
-
-static u64 addr_to_pid(u8 addr[PID_SIZE])
-{
-	u64 pid = 0;
-
-	memcpy(((u8 *)&pid) + 2, addr, PID_SIZE);
-	return be64_to_cpu(pid);
-}
-
 static int mctp_i3c_read(struct mctp_i3c_device *mi)
 {
 	struct i3c_priv_xfer xfer = { .rnw = 1, .len = mi->mrl };
@@ -133,8 +119,8 @@ static int mctp_i3c_read(struct mctp_i3c_device *mi)
 	/* Create a header for internal use */
 	skb_reset_mac_header(skb);
 	ihdr = skb_put(skb, sizeof(struct mctp_i3c_internal_hdr));
-	pid_to_addr(mi->pid, ihdr->source);
-	pid_to_addr(mi->mbus->pid, ihdr->dest);
+	put_unaligned_be48(mi->pid, ihdr->source);
+	put_unaligned_be48(mi->mbus->pid, ihdr->dest);
 	skb_pull(skb, sizeof(struct mctp_i3c_internal_hdr));
 
 	xfer.data.in = skb_put(skb, mi->mrl);
@@ -154,7 +140,6 @@ static int mctp_i3c_read(struct mctp_i3c_device *mi)
 		goto err;
 	}
 
-#ifdef CONFIG_MCTP_TRANSPORT_I3C_PEC
 	/* check PEC, including address byte */
 	addr = mi->addr << 1 | 1;
 	pec = i2c_smbus_pec(0, &addr, 1);
@@ -167,23 +152,16 @@ static int mctp_i3c_read(struct mctp_i3c_device *mi)
 
 	/* Remove PEC */
 	skb_trim(skb, xfer.len - 1);
-#else
-	skb_trim(skb, xfer.len);
-#endif
 
 	cb = __mctp_cb(skb);
 	cb->halen = PID_SIZE;
-	pid_to_addr(mi->pid, cb->haddr);
+	put_unaligned_be48(mi->pid, cb->haddr);
 
 	net_status = netif_rx(skb);
 
 	if (net_status == NET_RX_SUCCESS) {
 		stats->rx_packets++;
-#ifdef CONFIG_MCTP_TRANSPORT_I3C_PEC
 		stats->rx_bytes += xfer.len - 1;
-#else
-		stats->rx_bytes += xfer.len;
-#endif
 	} else {
 		stats->rx_dropped++;
 	}
@@ -221,7 +199,6 @@ static void mctp_i3c_ibi_handler(struct i3c_device *i3c,
 
 static int mctp_i3c_setup(struct mctp_i3c_device *mi)
 {
-	bool ibi_set = false, ibi_enabled = false;
 	const struct i3c_ibi_setup ibi = {
 		.max_payload_len = 1,
 		.num_slots = MCTP_I3C_IBI_SLOTS,
@@ -238,41 +215,41 @@ static int mctp_i3c_setup(struct mctp_i3c_device *mi)
 	mi->pid = info.pid;
 
 	rc = i3c_device_request_ibi(mi->i3c, &ibi);
-	if (rc == 0) {
-		ibi_set = true;
-	} else if (rc == -ENOTSUPP) {
-		/* This driver only supports In-Band Interrupt mode. Support for Polling Mode
-		 * could be added if required.
+	if (rc == -ENOTSUPP) {
+		/* This driver only supports In-Band Interrupt mode.
+		 * Support for Polling Mode could be added if required.
+		 * (ENOTSUPP is from the i3c layer, not EOPNOTSUPP).
 		 */
-		dev_warn(i3cdev_to_dev(mi->i3c), "Failed, bus driver doesn't support In-Band Interrupts");
+		dev_warn(i3cdev_to_dev(mi->i3c),
+			 "Failed, bus driver doesn't support In-Band Interrupts");
 		goto err;
-	} else {
-		dev_err(i3cdev_to_dev(mi->i3c), "Failed requesting IBI (%d)\n", rc);
+	} else if (rc < 0) {
+		dev_err(i3cdev_to_dev(mi->i3c),
+			"Failed requesting IBI (%d)\n", rc);
 		goto err;
 	}
 
-	if (ibi_set) {
-		/* Device setup must be complete when IBI is enabled */
-		rc = i3c_device_enable_ibi(mi->i3c);
-		if (rc < 0) {
-			/* Assume a driver supporting request_ibi also supports enable_ibi */
-			dev_err(i3cdev_to_dev(mi->i3c), "Failed enabling IBI (%d)\n", rc);
-			goto err;
-		}
-		ibi_enabled = true;
+	rc = i3c_device_enable_ibi(mi->i3c);
+	if (rc < 0) {
+		/* Assume a driver supporting request_ibi also
+		 * supports enable_ibi.
+		 */
+		dev_err(i3cdev_to_dev(mi->i3c), "Failed enabling IBI (%d)\n", rc);
+		goto err_free_ibi;
 	}
 
 	return 0;
+
+err_free_ibi:
+	i3c_device_free_ibi(mi->i3c);
+
 err:
-	if (ibi_enabled)
-		i3c_device_disable_ibi(mi->i3c);
-	if (ibi_set)
-		i3c_device_free_ibi(mi->i3c);
 	return rc;
 }
 
 /* Adds a new MCTP i3c_device to a bus */
-static int mctp_i3c_add_device(struct mctp_i3c_bus *mbus, struct i3c_device *i3c)
+static int mctp_i3c_add_device(struct mctp_i3c_bus *mbus,
+			       struct i3c_device *i3c)
 __must_hold(&busdevs_lock)
 {
 	struct mctp_i3c_device *mi = NULL;
@@ -291,22 +268,22 @@ __must_hold(&busdevs_lock)
 	i3cdev_set_drvdata(i3c, mi);
 	rc = mctp_i3c_setup(mi);
 	if (rc < 0)
-		goto err;
+		goto err_free;
 
 	return 0;
+
+err_free:
+	list_del(&mi->list);
+	kfree(mi);
+
 err:
 	dev_warn(i3cdev_to_dev(i3c), "Error adding mctp-i3c device, %d\n", rc);
-	if (mi) {
-		list_del(&mi->list);
-		kfree(mi);
-	}
 	return rc;
 }
 
 static int mctp_i3c_probe(struct i3c_device *i3c)
 {
 	struct mctp_i3c_bus *b = NULL, *mbus = NULL;
-	int rc;
 
 	/* Look for a known bus */
 	mutex_lock(&busdevs_lock);
@@ -322,14 +299,7 @@ static int mctp_i3c_probe(struct i3c_device *i3c)
 		return -ENODEV;
 	}
 
-	rc = mctp_i3c_add_device(mbus, i3c);
-	if (!rc)
-		goto err;
-
-	return 0;
-
-err:
-	return rc;
+	return mctp_i3c_add_device(mbus, i3c);
 }
 
 static void mctp_i3c_remove_device(struct mctp_i3c_device *mi)
@@ -400,7 +370,7 @@ static void mctp_i3c_xmit(struct mctp_i3c_bus *mbus, struct sk_buff *skb)
 
 	ihdr = (void *)skb_mac_header(skb);
 
-	pid = addr_to_pid(ihdr->dest);
+	pid = get_unaligned_be48(ihdr->dest);
 	mi = mctp_i3c_lookup(mbus, pid);
 	if (!mi) {
 		/* I3C endpoint went away after the packet was enqueued? */
@@ -411,7 +381,6 @@ static void mctp_i3c_xmit(struct mctp_i3c_bus *mbus, struct sk_buff *skb)
 	if (WARN_ON_ONCE(data_len + 1 > MCTP_I3C_MAXBUF))
 		goto out;
 
-#ifdef CONFIG_MCTP_TRANSPORT_I3C_PEC
 	if (data_len + 1 > (unsigned int)mi->mwl) {
 		/* Route MTU was larger than supported by the endpoint */
 		stats->tx_dropped++;
@@ -424,7 +393,6 @@ static void mctp_i3c_xmit(struct mctp_i3c_bus *mbus, struct sk_buff *skb)
 		skb_put(skb, 1);
 		data = skb->data;
 	} else {
-		// TODO: test this
 		/* Otherwise need to copy the buffer */
 		skb_copy_bits(skb, 0, mbus->tx_scratch, skb->len);
 		data = mbus->tx_scratch;
@@ -437,10 +405,6 @@ static void mctp_i3c_xmit(struct mctp_i3c_bus *mbus, struct sk_buff *skb)
 	data[data_len] = pec;
 
 	xfer.data.out = data;
-#else
-	xfer.len = data_len;
-	xfer.data.out = skb->data;
-#endif
 	rc = i3c_device_do_priv_xfers(mi->i3c, &xfer, 1);
 	if (rc == 0) {
 		stats->tx_bytes += data_len;
@@ -458,16 +422,15 @@ static int mctp_i3c_tx_thread(void *data)
 {
 	struct mctp_i3c_bus *mbus = data;
 	struct sk_buff *skb;
-	unsigned long flags;
 
 	for (;;) {
 		if (kthread_should_stop())
 			break;
 
-		spin_lock_irqsave(&mbus->tx_lock, flags);
+		spin_lock_bh(&mbus->tx_lock);
 		skb = mbus->tx_skb;
 		mbus->tx_skb = NULL;
-		spin_unlock_irqrestore(&mbus->tx_lock, flags);
+		spin_unlock_bh(&mbus->tx_lock);
 
 		if (netif_queue_stopped(mbus->ndev))
 			netif_wake_queue(mbus->ndev);
@@ -488,10 +451,9 @@ static netdev_tx_t mctp_i3c_start_xmit(struct sk_buff *skb,
 				       struct net_device *ndev)
 {
 	struct mctp_i3c_bus *mbus = netdev_priv(ndev);
-	unsigned long flags;
 	netdev_tx_t ret;
 
-	spin_lock_irqsave(&mbus->tx_lock, flags);
+	spin_lock(&mbus->tx_lock);
 	netif_stop_queue(ndev);
 	if (mbus->tx_skb) {
 		dev_warn_ratelimited(&ndev->dev, "TX with queue stopped");
@@ -500,7 +462,7 @@ static netdev_tx_t mctp_i3c_start_xmit(struct sk_buff *skb,
 		mbus->tx_skb = skb;
 		ret = NETDEV_TX_OK;
 	}
-	spin_unlock_irqrestore(&mbus->tx_lock, flags);
+	spin_unlock(&mbus->tx_lock);
 
 	if (ret == NETDEV_TX_OK)
 		wake_up(&mbus->tx_wq);
@@ -581,7 +543,8 @@ static bool mctp_i3c_is_mctp_controller(struct i3c_bus *bus)
 	if (!master)
 		return false;
 
-	return of_property_read_bool(master->common.master->dev.of_node, MCTP_I3C_OF_PROP);
+	return of_property_read_bool(master->common.master->dev.of_node,
+				     MCTP_I3C_OF_PROP);
 }
 
 /* Returns the Provisioned Id of a local bus master */
@@ -611,12 +574,12 @@ __must_hold(&busdevs_lock)
 		return ERR_PTR(-ENOENT);
 
 	snprintf(namebuf, sizeof(namebuf), "mctpi3c%d", bus->id);
-	ndev = alloc_netdev(sizeof(*mbus), namebuf, NET_NAME_ENUM, mctp_i3c_net_setup);
+	ndev = alloc_netdev(sizeof(*mbus), namebuf, NET_NAME_ENUM,
+			    mctp_i3c_net_setup);
 	if (!ndev) {
 		rc = -ENOMEM;
 		goto err;
 	}
-	dev_net_set(ndev, current->nsproxy->net_ns);
 
 	mbus = netdev_priv(ndev);
 	mbus->ndev = ndev;
@@ -627,38 +590,40 @@ __must_hold(&busdevs_lock)
 	rc = mctp_i3c_bus_local_pid(bus, &mbus->pid);
 	if (rc < 0) {
 		dev_err(&ndev->dev, "No I3C PID available\n");
-		goto err;
+		goto err_free_uninit;
 	}
-	pid_to_addr(mbus->pid, addr);
+	put_unaligned_be48(mbus->pid, addr);
 	dev_addr_set(ndev, addr);
 
 	init_waitqueue_head(&mbus->tx_wq);
 	spin_lock_init(&mbus->tx_lock);
-	mbus->tx_thread = kthread_create(mctp_i3c_tx_thread, mbus,
-					 "%s/tx", ndev->name);
+	mbus->tx_thread = kthread_run(mctp_i3c_tx_thread, mbus,
+				      "%s/tx", ndev->name);
 	if (IS_ERR(mbus->tx_thread)) {
 		dev_warn(&ndev->dev, "Error creating thread: %pe\n",
-			mbus->tx_thread);
+			 mbus->tx_thread);
 		rc = PTR_ERR(mbus->tx_thread);
 		mbus->tx_thread = NULL;
-		goto err;
+		goto err_free_uninit;
 	}
-	wake_up_process(mbus->tx_thread);
 
 	rc = mctp_register_netdev(ndev, NULL);
 	if (rc < 0) {
 		dev_warn(&ndev->dev, "netdev register failed: %d\n", rc);
-		goto err;
+		goto err_free_netdev;
 	}
 	return mbus;
-err:
+
+err_free_uninit:
 	/* uninit will not get called if a netdev has not been registered,
 	 * so we perform the same mbus cleanup manually.
 	 */
-	if (mbus)
-		mctp_i3c_bus_free(mbus);
-	if (ndev)
-		free_netdev(ndev);
+	mctp_i3c_bus_free(mbus);
+
+err_free_netdev:
+	free_netdev(ndev);
+
+err:
 	return ERR_PTR(rc);
 }
 
