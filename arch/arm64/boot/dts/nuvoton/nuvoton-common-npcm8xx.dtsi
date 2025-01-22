@@ -280,6 +280,12 @@
 			status = "disabled";
 		};
 
+		rng_tip: rng_tip@0 {
+			compatible = "nuvoton,npcm845-rng-tip";
+			reg = <0x0 0xf0800E54 0x0 0x10>;
+			status = "disabled";
+		};
+
 		gdma0: gdma@f0850000 {
 			compatible = "nuvoton,npcm-gdma";
 			reg = <0 0xf0850000 0 0x1000>,
