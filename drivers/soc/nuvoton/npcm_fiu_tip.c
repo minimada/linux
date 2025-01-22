@@ -107,11 +107,12 @@ static int npcm_fiu_tip_write(struct mtd_info *mtd, loff_t to, size_t len,
 			       size_t *retlen, const u_char *buf)
 {
 	struct npcm_fiu_tip *flash = mtd->priv;
+	const u8 *buf_tx = buf;
 	int err;
 
 	mutex_lock(&flash->head->mutex);
 
-	memcpy(flash->head->virt_off + (flash->head->phy_size/2), buf, len);
+	memcpy_toio(flash->head->virt_off + (flash->head->phy_size/2), buf_tx, len);
 	writel(NPCM_FIU_TIP_WRITE_CMD, flash->head->reg + NPCM_FIU_TIP_CMD);
 	writel((u32)(flash->head->phy_start + (flash->head->phy_size/2)), flash->head->reg + NPCM_FIU_TIP_SRC);
 	writel((u32)to + flash->offset, flash->head->reg + NPCM_FIU_TIP_DST);
@@ -165,7 +166,7 @@ static int npcm_fiu_tip_read(struct mtd_info *mtd, loff_t from, size_t len,
 		return err;
 	}
 
-	memcpy(buf, flash->head->virt_off, len);
+	memcpy_fromio(buf, flash->head->virt_off, len);
 
 	mutex_unlock(&flash->head->mutex);
 
