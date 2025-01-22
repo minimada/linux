@@ -71,4 +71,12 @@ config NPCM_ESPI_SLAVE
 	  Provides a driver to implement the espi slave driver that
 	  handle the espi events.
 
+config NPCM_TIP_RNG
+	tristate "Support NPCM TIP RNG"
+	depends on ARCH_NPCM || COMPILE_TEST
+	depends on MAILBOX
+	depends on HW_RANDOM
+	help
+	  This enables access to HW RNG device thourgh TIP in NPCM BMC's.
+
 endmenu
