@@ -248,6 +248,7 @@ struct npcm_dma_xfer_desc {
 	const u8 *out;
 	u8 *in;
 	u32 len;
+	u32 actual_len;
 	bool rnw;
 	bool end;
 };
@@ -337,8 +338,7 @@ struct svc_i3c_master {
 	/* Statistic report */
 	u8 err_code;
 	u64 err_cnt;
-	u64 rd_ibiwon_cnt;
-	u64 wr_ibiwon_cnt;
+	u64 ibiwon_cnt;
 };
 
 /**
@@ -353,7 +353,6 @@ struct svc_i3c_i2c_dev_data {
 	struct i3c_generic_ibi_pool *ibi_pool;
 };
 
-static int svc_i3c_master_wait_for_complete(struct svc_i3c_master *master);
 static void svc_i3c_master_stop_dma(struct svc_i3c_master *master);
 
 static void svc_i3c_master_err_stats(struct svc_i3c_master *master, u8 code)
@@ -791,6 +790,9 @@ static irqreturn_t svc_i3c_master_irq_handler(int irq, void *dev_id)
 {
 	struct svc_i3c_master *master = (struct svc_i3c_master *)dev_id;
 	u32 active = readl(master->regs + SVC_I3C_MINTMASKED), mstatus;
+	struct npcm_dma_xfer_desc *xfer = &master->dma_xfer;
+	int ch = xfer->rnw ? DMA_CH_RX : DMA_CH_TX;
+	u32 count;
 
 	if (SVC_I3C_MSTATUS_COMPLETE(active)) {
 		/* Clear COMPLETE status before emit STOP */
@@ -798,11 +800,22 @@ static irqreturn_t svc_i3c_master_irq_handler(int irq, void *dev_id)
 		/* Disable COMPLETE interrupt */
 		writel(SVC_I3C_MINT_COMPLETE, master->regs + SVC_I3C_MINTCLR);
 
-		if (master->dma_xfer.end) {
-			/* Stop DMA to prevent receiving the data of other transaction */
-			svc_i3c_master_stop_dma(master);
+		svc_i3c_master_stop_dma(master);
+		if (master->dma_xfer.end)
 			svc_i3c_master_emit_stop(master);
-		}
+
+		/* Get the DMA transfer count */
+		count = readl(master->dma_regs + NPCM_GDMA_CTCNT(ch));
+		count = (count > xfer->len) ? 0 :
+			(xfer->len - count);
+		dev_dbg(master->dev, "dma xfer count %u\n", count);
+		if (xfer->rnw)
+			memcpy(xfer->in, master->dma_rx_buf, count);
+		if (count != xfer->len)
+			dev_dbg(master->dev, "short dma xfer(%s), want %d transfer %d\n",
+				xfer->rnw ? "R" : "W", xfer->len, count);
+		xfer->actual_len = count;
+
 
 		complete(&master->xfer_comp);
 
@@ -1484,6 +1497,7 @@ static int svc_i3c_master_start_dma(struct svc_i3c_master *master)
 		xfer->rnw ? "R" : "W", xfer->len);
 
 	/* Set DMA transfer count */
+	xfer->actual_len = 0;
 	writel(xfer->len, master->dma_regs + NPCM_GDMA_TCNT(ch));
 
 	/* Write data to DMA TX table */
@@ -1491,7 +1505,6 @@ static int svc_i3c_master_start_dma(struct svc_i3c_master *master)
 		svc_i3c_master_write_dma_table(xfer->out,
 					       (u32 *)master->dma_tx_buf,
 					       xfer->len);
-
 
 	/*
 	 * Setup I3C DMA control
@@ -1519,44 +1532,13 @@ static int svc_i3c_master_start_dma(struct svc_i3c_master *master)
 	return 0;
 }
 
-static int svc_i3c_master_wait_for_complete(struct svc_i3c_master *master)
-{
-	struct npcm_dma_xfer_desc *xfer = &master->dma_xfer;
-	int ch = xfer->rnw ? DMA_CH_RX : DMA_CH_TX;
-	u32 count;
-	int ret;
-
-	ret = wait_for_completion_timeout(&master->xfer_comp, msecs_to_jiffies(100));
-	if (!ret) {
-		svc_i3c_master_stop_dma(master);
-		dev_err(master->dev, "DMA transfer timeout (%s)\n", xfer->rnw ? "Read" : "write");
-		dev_err(master->dev, "mstatus = 0x%02x\n", readl(master->regs + SVC_I3C_MSTATUS));
-		svc_i3c_master_err_stats(master, ETIMEDOUT);
-		return -ETIMEDOUT;
-	}
-
-	/* Get the DMA transfer count */
-	count = readl(master->dma_regs + NPCM_GDMA_CTCNT(ch));
-	count = (count > xfer->len) ? 0 :
-		(xfer->len - count);
-	dev_dbg(master->dev, "dma xfer count %u\n", count);
-	if (xfer->rnw)
-		memcpy(xfer->in, master->dma_rx_buf, count);
-	if (count != xfer->len)
-		dev_dbg(master->dev, "short dma xfer(%s), want %d transfer %d\n",
-			xfer->rnw ? "R" : "W", xfer->len, count);
-
-	svc_i3c_master_stop_dma(master);
-
-	return count;
-}
-
 static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 			       bool rnw, unsigned int xfer_type, u8 addr,
 			       u8 *in, const u8 *out, unsigned int xfer_len,
 			       unsigned int *actual_len, bool continued,
 			       bool use_dma)
 {
+	bool no_data = xfer_len ? false : true;
 	u32 reg, rdterm = *actual_len, mstatus;
 	int ret, i, count, space;
 	unsigned long flags;
@@ -1578,52 +1560,14 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 			rdterm = 2 + rdterm / 2;
 		master->hdr_mode = true;
 	}
+
 	/*
-	 * There is a chance that first tx data bit is lost when it
-	 * is not ready in FIFO right after address phase.
-	 * Prepare data before starting the transfer to fix this problem.
+	 * Acquire the spinlock to:
+	 * 1. Prevent concurrent execution of MCTRL request and IBI isr.
+	 * 2. Prevent schedule(local irq is disabled) to avoid TX FIFO
+	 *    empty during the transmission.
 	 */
-	if (!rnw && xfer_len && !use_dma) {
-		ret = readl_poll_timeout(master->regs + SVC_I3C_MDATACTRL,
-					 reg,
-					 !(reg & SVC_I3C_MDATACTRL_TXFULL),
-					 0, 1000);
-		if (ret)
-			return ret;
-
-		reg = readl(master->regs + SVC_I3C_MDATACTRL);
-		space = SVC_I3C_FIFO_SIZE - SVC_I3C_MDATACTRL_TXCOUNT(reg);
-		count = xfer_len > space ? space : xfer_len;
-		for (i = 0; i < count; i++) {
-			if (i == xfer_len - 1)
-				writel(out[0], master->regs + SVC_I3C_MWDATABE);
-			else
-				writel(out[0], master->regs + SVC_I3C_MWDATAB);
-			out++;
-		}
-		xfer_len -= count;
-	}
-	/* Prevent fifo operation from delay by interrupt */
-	if (!use_dma)
-		local_irq_disable();
-
-	/* Prevent DMA start while IBI isr is running */
 	spin_lock_irqsave(&master->req_lock, flags);
-	if (use_dma) {
-		if (xfer_len > MAX_DMA_COUNT) {
-			dev_err(master->dev, "data is larger than buffer size (%d)\n",
-				MAX_DMA_COUNT);
-			spin_unlock_irqrestore(&master->req_lock, flags);
-			return -EINVAL;
-		}
-		master->dma_xfer.out = out;
-		master->dma_xfer.in = in;
-		master->dma_xfer.len = xfer_len;
-		master->dma_xfer.rnw = rnw;
-		master->dma_xfer.end = !continued;
-		init_completion(&master->xfer_comp);
-		svc_i3c_master_start_dma(master);
-	}
 
 	/*
 	 * IBI payload size may be larger than rdterm, use manual IBI response
@@ -1643,10 +1587,42 @@ retry_start:
 	       SVC_I3C_MCTRL_RDTERM(rdterm),
 	       master->regs + SVC_I3C_MCTRL);
 
+	/*
+	 * HW issue:
+	 * I3C HW stalls the write transfer if the transmit FIFO becomes empty,
+	 * when new data is written to FIFO, I3C HW resumes the transfer but
+	 * the first transmitted data bit may have the wrong value.
+	 * Workaround:
+	 * Fill the FIFO in advance to prevent FIFO from becoming empty.
+	 */
+	if (!rnw && xfer_len) {
+		reg = readl(master->regs + SVC_I3C_MDATACTRL);
+		space = SVC_I3C_FIFO_SIZE - SVC_I3C_MDATACTRL_TXCOUNT(reg);
+		count = xfer_len > space ? space : xfer_len;
+		for (i = 0; i < count; i++) {
+			if (i == xfer_len - 1)
+				writel(out[0], master->regs + SVC_I3C_MWDATABE);
+			else
+				writel(out[0], master->regs + SVC_I3C_MWDATAB);
+			out++;
+		}
+		xfer_len -= count;
+		if (!xfer_len)
+			use_dma = false;
+	}
+	if (use_dma) {
+		master->dma_xfer.out = out;
+		master->dma_xfer.in = in;
+		master->dma_xfer.len = xfer_len;
+		master->dma_xfer.rnw = rnw;
+		master->dma_xfer.end = !continued;
+		svc_i3c_master_start_dma(master);
+	}
+
 	ret = readl_poll_timeout(master->regs + SVC_I3C_MSTATUS, reg,
 				 SVC_I3C_MSTATUS_MCTRLDONE(reg), 0, 1000);
 	if (ret)
-		goto emit_stop_locked;
+		goto emit_stop;
 
 	mstatus = readl(master->regs + SVC_I3C_MSTATUS);
 	if (SVC_I3C_MSTATUS_IBIWON(mstatus)) {
@@ -1677,8 +1653,6 @@ retry_start:
 			svc_i3c_master_emit_stop(master);
 			writel(SVC_I3C_MINT_IBIWON, master->regs + SVC_I3C_MSTATUS);
 			spin_unlock_irqrestore(&master->req_lock, flags);
-			if (!use_dma)
-				local_irq_enable();
 			/* Return EAGAIN to restart the transaction */
 			return -EAGAIN;
 		}
@@ -1689,15 +1663,11 @@ retry_start:
 		if (ret) {
 			dev_err(master->dev, "xfer(rnw %d): handle ibi event fail, ret=%d\n",
 				rnw, ret);
-			goto emit_stop_locked;
+			goto emit_stop;
 		}
-		if (rnw)
-			master->rd_ibiwon_cnt++;
-		else
-			master->wr_ibiwon_cnt++;
 		if (ktime_after(ktime_get(), timeout)) {
 			dev_info(master->dev, "abnormal ibiwon events\n");
-			goto emit_stop_locked;
+			goto emit_stop;
 		}
 
 		if (use_dma && rnw)
@@ -1705,23 +1675,40 @@ retry_start:
 
 		/* Clear COMPLETE status of this IBI transaction */
 		writel(SVC_I3C_MINT_COMPLETE, master->regs + SVC_I3C_MSTATUS);
+		master->ibiwon_cnt++;
 		goto retry_start;
 	}
-	/* Use COMPLETE interrupt as notification of transfer completion */
-	if (use_dma)
-		svc_i3c_master_enable_interrupts(master, SVC_I3C_MINT_COMPLETE);
-	spin_unlock_irqrestore(&master->req_lock, flags);
-
-	reg = readl(master->regs + SVC_I3C_MSTATUS);
-	if (SVC_I3C_MSTATUS_NACKED(reg)) {
+	if (SVC_I3C_MSTATUS_NACKED(mstatus)) {
 		dev_dbg(master->dev, "addr 0x%x NACK\n", addr);
 		ret = -EIO;
 		goto emit_stop;
 	}
 
-	if (use_dma)
-		ret = svc_i3c_master_wait_for_complete(master);
-	else if (rnw)
+	if (use_dma) {
+		init_completion(&master->xfer_comp);
+		/* Use COMPLETE interrupt as notification of transfer completion */
+		svc_i3c_master_enable_interrupts(master, SVC_I3C_MINT_COMPLETE);
+		spin_unlock_irqrestore(&master->req_lock, flags);
+		ret = wait_for_completion_timeout(&master->xfer_comp, msecs_to_jiffies(100));
+		if (ret < 0) {
+			svc_i3c_master_stop_dma(master);
+			svc_i3c_master_flush_fifo(master);
+			svc_i3c_master_emit_stop(master);
+			svc_i3c_master_clear_merrwarn(master);
+			dev_err(master->dev, "DMA transfer timeout (%s)\n",
+				rnw ? "Read" : "write");
+			dev_err(master->dev, "mstatus = 0x%02x\n",
+				readl(master->regs + SVC_I3C_MSTATUS));
+			svc_i3c_master_err_stats(master, ETIMEDOUT);
+			return ret;
+		}
+
+		if (rnw)
+			*actual_len = master->dma_xfer.actual_len;
+		return 0;
+	}
+
+	if (rnw)
 		ret = svc_i3c_master_read(master, in, xfer_len);
 	else
 		ret = svc_i3c_master_write(master, out, xfer_len);
@@ -1731,7 +1718,7 @@ retry_start:
 	if (rnw)
 		*actual_len = ret;
 
-	if (!use_dma) {
+	if (!no_data) {
 		ret = readl_poll_timeout(master->regs + SVC_I3C_MSTATUS, reg,
 					 SVC_I3C_MSTATUS_COMPLETE(reg), 0, 1000);
 		if (ret)
@@ -1751,17 +1738,14 @@ retry_start:
 		}
 	}
 
-	if (!continued && !use_dma)
+	if (!continued)
 		svc_i3c_master_emit_stop(master);
 
-	if (!use_dma)
-		local_irq_enable();
+	spin_unlock_irqrestore(&master->req_lock, flags);
 
 	return 0;
 
 emit_stop:
-	spin_lock_irqsave(&master->req_lock, flags);
-emit_stop_locked:
 	if (master->dma_started)
 		svc_i3c_master_stop_dma(master);
 	/*
@@ -1774,12 +1758,10 @@ emit_stop_locked:
 		readl_poll_timeout(master->regs + SVC_I3C_MSTATUS, reg,
 				   SVC_I3C_MSTATUS_COMPLETE(reg), 0, 1000);
 	}
+	svc_i3c_master_flush_fifo(master);
 	svc_i3c_master_emit_stop(master);
 	svc_i3c_master_clear_merrwarn(master);
-	svc_i3c_master_flush_fifo(master);
 	spin_unlock_irqrestore(&master->req_lock, flags);
-	if (!use_dma)
-		local_irq_enable();
 
 	return ret;
 }
@@ -2025,9 +2007,10 @@ static int svc_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 	struct svc_i3c_master *master = to_svc_i3c_master(m);
 	struct svc_i3c_i2c_dev_data *data = i3c_dev_get_master_data(dev);
 	struct svc_i3c_xfer *xfer;
+	struct svc_i3c_cmd *cmd;
 	int ret, i;
 
-	xfer = svc_i3c_master_alloc_xfer(master, nxfers);
+	xfer = svc_i3c_master_alloc_xfer(master, nxfers + 1);
 	if (!xfer)
 		return -ENOMEM;
 
@@ -2036,8 +2019,27 @@ static int svc_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 	else
 		xfer->type = SVC_I3C_MCTRL_TYPE_I3C;
 
+	/*
+	 * I3C Spec 1.1, Section 5.1.6.4
+	 * In order to ensure that any other I3C Device can initiate a Target
+	 * Interrupt Request or a Controller Role Request, the I3C Active
+	 * Controller may choose to initiate new Frames with a START followed
+	 * by the I3C Broadcast Address (7’h7E).
+	 *
+	 * Start the private transfer with broadcast address
+	 */
+	cmd = &xfer->cmds[0];
+	cmd->addr = I3C_BROADCAST_ADDR;
+	cmd->rnw = 0;
+	cmd->in = NULL;
+	cmd->out = NULL;
+	cmd->len = 0;
+	cmd->actual_len = SVC_I3C_MAX_IBI_PAYLOAD_SIZE;
+	cmd->use_dma = false;
+	cmd->continued = true;
+
 	for (i = 0; i < nxfers; i++) {
-		struct svc_i3c_cmd *cmd = &xfer->cmds[i];
+		struct svc_i3c_cmd *cmd = &xfer->cmds[i + 1];
 
 		cmd->xfer = &xfers[i];
 		cmd->addr = master->addrs[data->index];
@@ -2047,7 +2049,8 @@ static int svc_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 		cmd->len = xfers[i].len;
 		cmd->actual_len = xfers[i].rnw ? xfers[i].len : 0;
 		cmd->continued = (i + 1) < nxfers;
-		if (master->use_dma && xfers[i].len > 1)
+		if (master->use_dma && (xfers[i].len > SVC_I3C_FIFO_SIZE)
+		    && (xfers[i].len <= MAX_DMA_COUNT))
 			cmd->use_dma = true;
 	}
 
@@ -2058,7 +2061,7 @@ static int svc_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 	mutex_unlock(&master->lock);
 
 	for (i = 0; i < nxfers; i++) {
-		struct svc_i3c_cmd *cmd = &xfer->cmds[i];
+		struct svc_i3c_cmd *cmd = &xfer->cmds[i + 1];
 
 		if (xfers[i].rnw)
 			xfers[i].len = cmd->actual_len;
@@ -2580,8 +2583,7 @@ static void svc_i3c_init_debugfs(struct platform_device *pdev,
 	debugfs_create_file("debug", 0444, master->debugfs, master, &debug_fops);
 	debugfs_create_u64("err_cnt", 0444, master->debugfs, &master->err_cnt);
 	debugfs_create_u8("err_code", 0444, master->debugfs, &master->err_code);
-	debugfs_create_u64("rd_ibiwon_cnt", 0444, master->debugfs, &master->rd_ibiwon_cnt);
-	debugfs_create_u64("wr_ibiwon_cnt", 0444, master->debugfs, &master->wr_ibiwon_cnt);
+	debugfs_create_u64("ibiwon_cnt", 0444, master->debugfs, &master->ibiwon_cnt);
 }
 
 static int svc_i3c_setup_dma(struct platform_device *pdev, struct svc_i3c_master *master)
