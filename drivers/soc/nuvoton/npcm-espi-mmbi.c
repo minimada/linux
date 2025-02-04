@@ -464,7 +464,7 @@ static bool check_host_reset_request(struct npcm_mmbi_channel *channel)
 	return true;
 }
 
-void wake_up_device(struct npcm_mmbi_channel *channel)
+static void wake_up_device(struct npcm_mmbi_channel *channel)
 {
 	u32 req_data_len, unread_data_len;
 	u8 type;
